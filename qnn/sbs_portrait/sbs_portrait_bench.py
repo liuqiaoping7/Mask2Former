@@ -14,6 +14,9 @@ Configs (alpha generation, all evaluated on the same frames in one pass):
   soft+T     + motion-compensated confidence-weighted temporal EMA (per eye)
   soft+S     + stereo fusion: a_L' = (a_L + warp_R->L(a_R)) / 2, a_R' likewise
   soft+T+S   temporal EMA per eye, then stereo fusion
+  final      soft -> guided filter (per eye) -> temporal EMA -> stereo fusion
+             (per-eye operations before the fusion, so the fusion's L/R
+             consistency is not undone afterwards)
 """
 import argparse
 import json
@@ -28,14 +31,15 @@ import torch
 import temporal_stereo as ts
 from seg import DEFAULT_CONFIG, DEFAULT_WEIGHTS, PersonSegmenter
 
-CONFIGS = ["raw", "soft", "soft+T", "soft+S", "soft+T+S"]
-VIDEO_CONFIGS = ["raw"]
-FLICKER_MAP_CONFIGS = ["raw"]
+CONFIGS = ["raw", "soft", "soft+T", "soft+S", "soft+T+S", "final"]
+VIDEO_CONFIGS = ["raw", "final"]
+FLICKER_MAP_CONFIGS = ["raw", "final"]
 # timer keys that make up each config's post-processing latency
 POST_KEYS = {"raw": ["post_raw"], "soft": ["post_soft"], "soft+T": ["post_soft", "post_soft+T"],
-             "soft+S": ["post_soft", "post_soft+S"], "soft+T+S": ["post_soft", "post_soft+T", "post_S_after_T"]}
+             "soft+S": ["post_soft", "post_soft+S"], "soft+T+S": ["post_soft", "post_soft+T", "post_S_after_T"],
+             "final": ["post_soft", "post_G_T_left", "post_G_T_right_S"]}
 # configs whose post-processing needs optical flow / disparity
-USES_GEOMETRY = {"soft+T", "soft+S", "soft+T+S"}
+USES_GEOMETRY = {"soft+T", "soft+S", "soft+T+S", "final"}
 
 
 def split_sbs(img):
@@ -87,6 +91,7 @@ def main():
     ap.add_argument("--cache", default="", help="dir to cache per-frame segmentation (reuse across runs)")
     ap.add_argument("--soft", default="0.3,0.7", help="smoothstep range prob -> alpha")
     ap.add_argument("--lam", type=float, default=0.7, help="temporal EMA strength")
+    ap.add_argument("--gf", default="8,1e-3", help="guided filter radius,eps (work resolution)")
     ap.add_argument("--bg-margin", type=float, default=4.0,
                     help="px (full res) the background must stay behind the person's nearest disparity")
     ap.add_argument("--no-bg-shift", action="store_true", help="disable background depth placement")
@@ -114,6 +119,7 @@ def main():
     for _ in range(2):  # warm-up
         segment([L0, R0])
     soft_lo, soft_hi = map(float, args.soft.split(","))
+    gf_r, gf_eps = int(args.gf.split(",")[0]), float(args.gf.split(",")[1])
 
     # ---------------- stereo / flow setup ----------------
     gL0, gR0 = [cv2.cvtColor(down(x, ws), cv2.COLOR_BGR2GRAY) for x in (L0, R0)]
@@ -146,7 +152,7 @@ def main():
 
     # ---------------- state ----------------
     acc = {c: ts.MetricAccumulator() for c in CONFIGS}
-    ema = {k: ts.TemporalEMA(args.lam) for k in ("T_L", "T_R")}
+    ema = {k: ts.TemporalEMA(args.lam) for k in ("T_L", "T_R", "G_L", "G_R")}
     prev_alpha = {c: None for c in CONFIGS}
     prev_comp = {c: None for c in CONFIGS}
     flicker_map = {c: np.zeros(ws[::-1], np.float32) for c in FLICKER_MAP_CONFIGS}
@@ -180,6 +186,7 @@ def main():
 
         Ls, Rs = down(L, ws), down(R, ws)
         gL, gR = cv2.cvtColor(Ls, cv2.COLOR_BGR2GRAY), cv2.cvtColor(Rs, cv2.COLOR_BGR2GRAY)
+        guideL, guideR = gL.astype(np.float32) / 255.0, gR.astype(np.float32) / 255.0
         pL, pR = down(pL, ws), down(pR, ws)
         hL = down(hL.astype(np.uint8), ws, cv2.INTER_NEAREST).astype(bool)
         hR = down(hR.astype(np.uint8), ws, cv2.INTER_NEAREST).astype(bool)
@@ -234,6 +241,14 @@ def main():
         t0 = time.perf_counter()
         alphas["soft+T+S"] = (0.5 * (tL + ts.warp_r2l(tR, dLf)), 0.5 * (tR + ts.warp_l2r(tL, dRf)))
         timer.add("post_S_after_T", time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        gaL = ema["G_L"](ts.guided_filter(guideL, sL, gf_r, gf_eps), fbL, vL, phL)
+        timer.add("post_G_T_left", time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        gaR = ema["G_R"](ts.guided_filter(guideR, sR, gf_r, gf_eps), fbR, vR, phR)
+        alphas["final"] = (0.5 * (gaL + ts.warp_r2l(gaR, dLf)), 0.5 * (gaR + ts.warp_l2r(gaL, dRf)))
+        timer.add("post_G_T_right_S", time.perf_counter() - t0)
 
         # ---------------- metrics ----------------
         bandL_m, bandR_m = ts.boundary_band(hL, 10), ts.boundary_band(hR, 10)

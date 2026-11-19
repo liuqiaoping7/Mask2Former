@@ -141,6 +141,18 @@ def fill_disparity(d, person_band, d_person, d_default):
 # ----------------------------------------------------------------------------
 # alpha post-processing
 # ----------------------------------------------------------------------------
+def guided_filter(guide, p, r=8, eps=1e-3):
+    """Edge-aware smoothing of alpha p guided by the gray image (He et al.)."""
+    k = (2 * r + 1, 2 * r + 1)
+    mean = lambda x: cv2.boxFilter(x, -1, k)
+    mi, mp = mean(guide), mean(p)
+    cov = mean(guide * p) - mi * mp
+    var = mean(guide * guide) - mi * mi
+    a = cov / (var + eps)
+    b = mp - a * mi
+    return np.clip(mean(a) * guide + mean(b), 0.0, 1.0)
+
+
 def soft_alpha(prob, lo=0.3, hi=0.7):
     """Map class probability to alpha with a smoothstep between lo and hi."""
     t = np.clip((prob - lo) / (hi - lo), 0.0, 1.0)
