@@ -26,7 +26,7 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 
 class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
-                 backbone="torch", eye_hw=(1080, 1920), trt_plan=None, fused=True):
+                 backbone="torch", eye_hw=(1080, 1920), trt_plan=None, fused=True, fast_decoder=False):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
@@ -34,7 +34,9 @@ class PersonSegmenter:
         person() (built on first use for eyes of size eye_hw; the torch backbone weights are
         then released). With "trt" only person() is available.
         fused: person() post-processing with the fused Triton kernel (person_triton.py) instead
-        of the grid_sample / matmul / argmax torch ops."""
+        of the grid_sample / matmul / argmax torch ops.
+        fast_decoder: inference-only transformer-decoder forward without redundant work
+        (see _decoder_inference_forward); outputs only pred_logits / pred_masks."""
         cfg = get_cfg()
         add_deeplab_config(cfg)
         add_maskformer2_config(cfg)
@@ -59,6 +61,11 @@ class PersonSegmenter:
             _enable_pixel_decoder_fp16(self.model)
         self.stream = torch.cuda.Stream()
         self.fused = fused
+        if fast_decoder:
+            import types
+
+            pred = self.model.sem_seg_head.predictor
+            pred.forward = types.MethodType(_decoder_inference_forward, pred)
         self.trt = None
         if backbone == "trt":
             from trt_backbone import TRTBackbone, build_engine
@@ -286,6 +293,56 @@ def _enable_pixel_decoder_fp16(model):
         msda_mod._fp32_wrapped = True
     pd = model.sem_seg_head.pixel_decoder
     pd.forward_features = types.MethodType(_pixel_decoder_fp16_forward_features, pd)
+
+
+def _decoder_inference_forward(self, x, mask_features, mask=None):
+    """MultiScaleMaskedTransformerDecoder.forward for inference, mathematically equal outputs.
+
+    Upstream computes, after every layer, full-resolution mask logits (einsum over the 1/4-res
+    mask features), bilinearly downsamples them to the next attention size, applies sigmoid,
+    repeats the boolean mask for every head and fixes fully-masked rows with a data-dependent
+    index (host sync); it also builds class logits / masks for every layer (aux outputs).
+    Here: bilinear resampling commutes with the per-query linear mask head, so mask_features
+    is resampled once per attention size and the logits are computed there directly;
+    sigmoid(x) < 0.5 <=> x < 0; with batch 1 a 2-D mask broadcasts over heads; the row fix is
+    a mask expression; class logits / full-res masks are produced for the last layer only.
+    """
+    import torch.nn.functional as F
+
+    src, pos, size_list = [], [], []
+    for i in range(self.num_feature_levels):
+        size_list.append(tuple(x[i].shape[-2:]))
+        pos.append(self.pe_layer(x[i], None).flatten(2).permute(2, 0, 1))
+        src.append((self.input_proj[i](x[i]).flatten(2) + self.level_embed.weight[i][None, :, None]).permute(2, 0, 1))
+    bs = src[0].shape[1]
+    query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
+    output = self.query_feat.weight.unsqueeze(1).repeat(1, bs, 1)
+    mf_at = {}
+
+    def attn_mask_for(out, size):
+        if size not in mf_at:
+            mf_at[size] = F.interpolate(mask_features, size=size, mode="bilinear", align_corners=False)
+        emb = self.mask_embed(self.decoder_norm(out).transpose(0, 1))
+        m = (torch.einsum("bqc,bchw->bqhw", emb, mf_at[size]) < 0).flatten(2)  # True = not attended
+        m = m & ~m.all(-1, keepdim=True)  # fully masked rows attend everywhere (upstream rule)
+        if bs == 1:
+            return m[0]
+        return m.unsqueeze(1).expand(-1, self.num_heads, -1, -1).flatten(0, 1)
+
+    attn_mask = attn_mask_for(output, size_list[0])
+    for i in range(self.num_layers):
+        level = i % self.num_feature_levels
+        output = self.transformer_cross_attention_layers[i](
+            output, src[level], memory_mask=attn_mask, memory_key_padding_mask=None,
+            pos=pos[level], query_pos=query_embed)
+        output = self.transformer_self_attention_layers[i](
+            output, tgt_mask=None, tgt_key_padding_mask=None, query_pos=query_embed)
+        output = self.transformer_ffn_layers[i](output)
+        if i < self.num_layers - 1:
+            attn_mask = attn_mask_for(output, size_list[(i + 1) % self.num_feature_levels])
+    dec = self.decoder_norm(output).transpose(0, 1)
+    return {"pred_logits": self.class_embed(dec),
+            "pred_masks": torch.einsum("bqc,bchw->bqhw", self.mask_embed(dec), mask_features)}
 
 
 def _panoptic_person_rule(model, scores, keep, labels, ids, own_at, own_area):
