@@ -104,6 +104,7 @@ def main():
     for t, f in enumerate(files):
         if t:
             timer.new_frame()
+        torch.cuda.nvtx.range_push(f"frame{t}")  # per-frame range for nsys (prof/nsys_analyze.py)
         t0 = time.perf_counter()
         with timer("read"):  # wait for the prefetched frame
             frame = nxt.result()
@@ -117,6 +118,7 @@ def main():
             pending = enc.submit(lambda o: writer.write(cv2.resize(o, (W, H // 2), interpolation=cv2.INTER_AREA)), out)
         torch.cuda.synchronize()
         frame_ms.append((time.perf_counter() - t0) * 1000.0)
+        torch.cuda.nvtx.range_pop()
         # outputs for correctness checks (not timed)
         if args.dump:
             r = {k: (v.cpu().numpy() if torch.is_tensor(v) else v) for k, v in r.items()}

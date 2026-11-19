@@ -47,3 +47,16 @@ python sbs_portrait_bench.py --frames ~/data/sbs/portrait_0121 --bg ~/data/sbs/b
 - `run_pipeline.py`：端到端延迟、逐模块耗时（`--profile` 时 GPU 模块前后同步）、NVML 显存峰值、RSS 峰值；`--dump` 保存逐帧 alpha 供离线评估。
 - `eval_alpha.py`：离线计算 3D 质量指标，并与参考运行（基线）对比 alpha 误差和关键帧 PSNR。
 - `opt_step.sh <name>`：一次优化的标准测量流程，结果写入 `results/opt/<name>/`。
+
+### 优化后的流水线（默认开启）
+
+| 模块 | 实现 | 开关 |
+| ---- | ---- | ---- |
+| 模型输入缩放 | `cv2.resize(INTER_AREA)`，在提交几何线程前执行 | – |
+| backbone | TensorRT FP16 静态形状 engine（`trt_backbone.py`，首次运行自动构建到 `weights/`） | `backbone="trt"` |
+| pixel decoder / transformer decoder | FP16 autocast（MSDA 核保持 FP32）、推理专用 decoder forward、`torch.compile` | `precision="fp16"`、`fast_decoder`、`compile_decoders` |
+| person 后处理 | Triton 融合 kernel（`person_triton.py`），直接输出 960x540 | `fused` |
+| alpha 后处理 + 合成 | GPU（`gpu_post.py`），pinned 缓冲上传 / 回传 | `post="gpu"` |
+| 视差 / 光流 | CPU 工作线程，与 GPU 分割并行 | `overlap` |
+
+首次运行需构建 TensorRT engine（约 2 分钟，主机内存峰值约 10 GB）并编译 decoder（约 1.5 分钟）；engine 与 Inductor 缓存与 GPU 型号和 TensorRT / PyTorch 版本绑定，不入库。逐项优化的测量结果见 `results/opt/`（`rejected_*` 为已回退的尝试）。

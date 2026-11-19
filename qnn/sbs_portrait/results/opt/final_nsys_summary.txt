@@ -1,0 +1,7 @@
+nsys (run_pipeline.py, commit fe51e3c, 40 frames, steady-state window of 35 frames)
+frames 35  wall/frame 219.2 ms  GPU busy 198.5 ms (90.6%)        [baseline bench: 62.5%]
+memcpy HtoD: 12/frame 40.2 MB/frame 4.48 ms/frame 9.0 GB/s      (pinned: frame + flows + disparities)
+memcpy DtoH: 43/frame 12.4 MB/frame 1.20 ms/frame 10.4 GB/s     [baseline: 258/frame 20.7 MB 5.8 GB/s pageable]
+memcpy DtoD:  2/frame  4.1 MB/frame                              [baseline: 96/frame 2019 MB]
+runtime cudaStreamSynchronize   44 calls/frame  148.1 ms/frame   [baseline: 282 calls, 898.9 ms]
+runtime cudaLaunchKernel*     2446 calls/frame    8.2 ms/frame   [baseline: 3808 calls, 10.4 ms]
