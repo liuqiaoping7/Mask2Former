@@ -9,6 +9,8 @@ Configs (alpha generation, all evaluated on the same frames in one pass):
   raw        panoptic person mask per eye, per frame (hard 0/1) -- baseline
   soft       semantic person probability -> smoothstep alpha
   soft+T     + motion-compensated confidence-weighted temporal EMA (per eye)
+  soft+S     + stereo fusion: a_L' = (a_L + warp_R->L(a_R)) / 2, a_R' likewise
+  soft+T+S   temporal EMA per eye, then stereo fusion
 """
 import argparse
 import json
@@ -23,13 +25,14 @@ import torch
 import temporal_stereo as ts
 from seg import DEFAULT_CONFIG, DEFAULT_WEIGHTS, PersonSegmenter
 
-CONFIGS = ["raw", "soft", "soft+T"]
+CONFIGS = ["raw", "soft", "soft+T", "soft+S", "soft+T+S"]
 VIDEO_CONFIGS = ["raw"]
 FLICKER_MAP_CONFIGS = ["raw"]
 # timer keys that make up each config's post-processing latency
-POST_KEYS = {"raw": ["post_raw"], "soft": ["post_soft"], "soft+T": ["post_soft", "post_soft+T"]}
+POST_KEYS = {"raw": ["post_raw"], "soft": ["post_soft"], "soft+T": ["post_soft", "post_soft+T"],
+             "soft+S": ["post_soft", "post_soft+S"], "soft+T+S": ["post_soft", "post_soft+T", "post_S_after_T"]}
 # configs whose post-processing needs optical flow / disparity
-USES_GEOMETRY = {"soft+T"}
+USES_GEOMETRY = {"soft+T", "soft+S", "soft+T+S"}
 
 
 def split_sbs(img):
@@ -130,6 +133,7 @@ def main():
     writers = {c: cv2.VideoWriter(os.path.join(args.out, f"composite_{c}.mp4"), fourcc, 30, (W, H // 2))
                for c in VIDEO_CONFIGS}
     prev_g = None
+    last_person_disp = 0.0
 
     for t, f in enumerate(files):
         frame = f0 if t == 0 else cv2.imread(f)
@@ -172,6 +176,18 @@ def main():
         timer.add("flow_LR", time.perf_counter() - t0)
         prev_g = (gL, gR)
 
+        # dense disparity for L/R warping: invalid pixels in the person band -> person disparity
+        t0 = time.perf_counter()
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+        bandL = cv2.dilate((hL | (pL > 0.3)).astype(np.uint8), k).astype(bool)
+        bandR = cv2.dilate((hR | (pR > 0.3)).astype(np.uint8), k).astype(bool)
+        coreL = cv2.erode(hL.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+        last_person_disp = nanpct(dL[coreL], 50, last_person_disp)
+        d_def = nanpct(dL, 50, 0.0)
+        dLf = ts.fill_disparity(dL, bandL, last_person_disp, d_def)
+        dRf = ts.fill_disparity(dR, bandR, last_person_disp, d_def)
+        timer.add("disp_fill", time.perf_counter() - t0)
+
         # ---------------- alpha per config ----------------
         alphas = {}
         t0 = time.perf_counter()
@@ -188,6 +204,14 @@ def main():
         tR = ema["T_R"](sR, fbR, vR, phR)
         alphas["soft+T"] = (tL, tR)
         timer.add("post_soft+T", time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        alphas["soft+S"] = (0.5 * (sL + ts.warp_r2l(sR, dLf)), 0.5 * (sR + ts.warp_l2r(sL, dRf)))
+        timer.add("post_soft+S", time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        alphas["soft+T+S"] = (0.5 * (tL + ts.warp_r2l(tR, dLf)), 0.5 * (tR + ts.warp_l2r(tL, dRf)))
+        timer.add("post_S_after_T", time.perf_counter() - t0)
 
         # ---------------- metrics ----------------
         bandL_m, bandR_m = ts.boundary_band(hL, 10), ts.boundary_band(hR, 10)

@@ -42,6 +42,11 @@ def warp_r2l(a_r, d_l):
     return warp_h(a_r, -d_l)
 
 
+def warp_l2r(a_l, d_r):
+    """Left-eye map sampled into right-eye coordinates with right disparity."""
+    return warp_h(a_l, d_r)
+
+
 # ----------------------------------------------------------------------------
 # optical flow
 # ----------------------------------------------------------------------------
@@ -118,6 +123,19 @@ class StereoEstimator:
         dl[~(np.abs(dl - dr_at_l) <= 1.5)] = np.nan
         dr[~(np.abs(dr - dl_at_r) <= 1.5)] = np.nan
         return dl, dr
+
+
+def fill_disparity(d, person_band, d_person, d_default):
+    """Fill invalid disparity: person disparity inside the person band, default elsewhere.
+
+    SGBM is unreliable exactly at the person boundary (occlusions), which is where
+    the L/R alphas must agree, so the band falls back to the person's median disparity.
+    """
+    out = d.copy()
+    inv = np.isnan(out)
+    out[inv & person_band] = d_person
+    out[inv & ~person_band] = d_default
+    return out
 
 
 # ----------------------------------------------------------------------------
