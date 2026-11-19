@@ -106,14 +106,16 @@ class SBSPortraitPipeline:
 
     # ------------------------------------------------------------------ stages
     def segment_eyes(self, L, R, record=True):
-        """Person prob / hard mask for both eyes at work resolution (numpy)."""
+        """Person prob / hard mask for both eyes at work resolution (numpy).
+
+        Person-only inference evaluated directly on the work grid (seg.person), instead of
+        the official full-res semantic + panoptic post-processing followed by a downscale.
+        """
         tm = self.timer if record else Timer()
         out = []
         for eye in (L, R):
-            prob, hard = self.seg([eye], timer=tm)[0]
-            with tm("seg.downscale"):
-                out.append(down(prob, self.ws))
-                out.append(down(hard.astype(np.uint8), self.ws, cv2.INTER_NEAREST).astype(bool))
+            prob, hard = self.seg.person([eye], self.ws, timer=tm)[0]
+            out += [prob, hard]
         return out  # pL, hL, pR, hR
 
     def geometry(self, L, R):
