@@ -26,7 +26,8 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 
 class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
-                 backbone="torch", eye_hw=(1080, 1920), trt_plan=None, fused=True, fast_decoder=False):
+                 backbone="torch", eye_hw=(1080, 1920), trt_plan=None, fused=True, fast_decoder=False,
+                 compile_decoders=False):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
@@ -36,7 +37,10 @@ class PersonSegmenter:
         fused: person() post-processing with the fused Triton kernel (person_triton.py) instead
         of the grid_sample / matmul / argmax torch ops.
         fast_decoder: inference-only transformer-decoder forward without redundant work
-        (see _decoder_inference_forward); outputs only pred_logits / pred_masks."""
+        (see _decoder_inference_forward); outputs only pred_logits / pred_masks.
+        compile_decoders: torch.compile (Inductor, max-autotune without CUDA graphs, static
+        shapes) the pixel decoder and the transformer decoder; first use compiles for ~2 min,
+        the Inductor cache under weights/inductor_cache makes later starts fast."""
         cfg = get_cfg()
         add_deeplab_config(cfg)
         add_maskformer2_config(cfg)
@@ -66,6 +70,12 @@ class PersonSegmenter:
 
             pred = self.model.sem_seg_head.predictor
             pred.forward = types.MethodType(_decoder_inference_forward, pred)
+        if compile_decoders:
+            os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(REPO, "weights", "inductor_cache"))
+            head = self.model.sem_seg_head
+            opts = dict(mode="max-autotune-no-cudagraphs", dynamic=False)
+            head.pixel_decoder.forward_features = torch.compile(head.pixel_decoder.forward_features, **opts)
+            head.predictor.forward = torch.compile(head.predictor.forward, **opts)
         self.trt = None
         if backbone == "trt":
             from trt_backbone import TRTBackbone, build_engine
