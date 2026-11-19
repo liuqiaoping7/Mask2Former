@@ -27,9 +27,9 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
                  backbone="torch", eye_hw=(1080, 1920), trt_plan=None):
-        """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the model (the MSDeformAttn
-        pixel decoder forces FP32 internally; TF32 matmul is enabled for it) and FP16 person
-        post-processing in person().
+        """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
+        decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
+        enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
         backbone: "torch" or "trt" -- static-shape TensorRT FP16 engine for the backbone, used by
         person() (built on first use for eyes of size eye_hw; the torch backbone weights are
         then released). With "trt" only person() is available."""
@@ -54,6 +54,7 @@ class PersonSegmenter:
         if self.fp16:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+            _enable_pixel_decoder_fp16(self.model)
         self.stream = torch.cuda.Stream()
         self.trt = None
         if backbone == "trt":
@@ -197,6 +198,65 @@ class PersonSegmenter:
             else:
                 res.append((prob, hard))
         return res
+
+
+def _pixel_decoder_fp16_forward_features(self, features):
+    """MSDeformAttnPixelDecoder.forward_features without the FP32 forcing (the upstream method
+    is decorated with autocast(enabled=False) and casts its inputs with .float()). Under FP16
+    autocast the projections, encoder FFN/linears and FPN convs run in FP16; the MSDeformAttn
+    CUDA kernel itself stays FP32 through _FP32MSDeformAttnFunction."""
+    srcs, pos = [], []
+    for idx, f in enumerate(self.transformer_in_features[::-1]):
+        x = features[f]
+        srcs.append(self.input_proj[idx](x))
+        pos.append(self.pe_layer(x))
+    y, spatial_shapes, level_start_index = self.transformer(srcs, pos)
+    bs = y.shape[0]
+    split = [None] * self.transformer_num_feature_levels
+    for i in range(self.transformer_num_feature_levels):
+        if i < self.transformer_num_feature_levels - 1:
+            split[i] = level_start_index[i + 1] - level_start_index[i]
+        else:
+            split[i] = y.shape[1] - level_start_index[i]
+    y = torch.split(y, split, dim=1)
+    out, multi_scale_features, num_cur_levels = [], [], 0
+    for i, z in enumerate(y):
+        out.append(z.transpose(1, 2).view(bs, -1, spatial_shapes[i][0], spatial_shapes[i][1]))
+    for idx, f in enumerate(self.in_features[:self.num_fpn_levels][::-1]):
+        x = features[f]
+        cur_fpn = self.lateral_convs[idx](x)
+        y = cur_fpn + torch.nn.functional.interpolate(out[-1], size=cur_fpn.shape[-2:], mode="bilinear",
+                                                      align_corners=False)
+        out.append(self.output_convs[idx](y))
+    for o in out:
+        if num_cur_levels < self.maskformer_num_feature_levels:
+            multi_scale_features.append(o)
+            num_cur_levels += 1
+    return self.mask_features(out[-1]), out[0], multi_scale_features
+
+
+def _enable_pixel_decoder_fp16(model):
+    import types
+
+    from mask2former.modeling.pixel_decoder.ops.modules import ms_deform_attn as msda_mod
+
+    if not getattr(msda_mod, "_fp32_wrapped", False):
+        orig = msda_mod.MSDeformAttnFunction
+
+        class _FP32MSDeformAttnFunction:
+            """The MSDA CUDA kernel only dispatches float/double; a half input would raise and the
+            module would silently fall back to the slow pure-PyTorch path. Run it in FP32."""
+
+            @staticmethod
+            def apply(value, shapes, level_start_index, sampling_locations, attention_weights, im2col_step):
+                out = orig.apply(value.float(), shapes, level_start_index, sampling_locations.float(),
+                                 attention_weights.float(), im2col_step)
+                return out.to(value.dtype)
+
+        msda_mod.MSDeformAttnFunction = _FP32MSDeformAttnFunction
+        msda_mod._fp32_wrapped = True
+    pd = model.sem_seg_head.pixel_decoder
+    pd.forward_features = types.MethodType(_pixel_decoder_fp16_forward_features, pd)
 
 
 class _NullTimer:
