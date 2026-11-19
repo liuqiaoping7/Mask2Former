@@ -14,6 +14,7 @@ import resource
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from glob import glob
 
 import cv2
@@ -94,16 +95,26 @@ def main():
     W, H = pipe.W, pipe.H
     writer = cv2.VideoWriter(os.path.join(args.out, "preview.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 30, (W, H // 2))
 
+    # I/O off the critical path: decode of the next frame is prefetched, encoding is asynchronous
+    io = ThreadPoolExecutor(1, thread_name_prefix="decode")
+    enc = ThreadPoolExecutor(1, thread_name_prefix="encode")
+    nxt = io.submit(cv2.imread, files[0])
+    pending = None
     frame_ms = []
     for t, f in enumerate(files):
         if t:
             timer.new_frame()
         t0 = time.perf_counter()
-        with timer("read"):
-            frame = cv2.imread(f)
+        with timer("read"):  # wait for the prefetched frame
+            frame = nxt.result()
+            if t + 1 < len(files):
+                nxt = io.submit(cv2.imread, files[t + 1])
         r = pipe.process(frame)
-        with timer("encode"):
-            writer.write(cv2.resize(r["out"], (W, H // 2), interpolation=cv2.INTER_AREA))
+        with timer("encode"):  # bounded queue: at most one encode in flight
+            if pending is not None:
+                pending.result()
+            out = r["out"].copy()  # r["out"] is a reused pinned buffer
+            pending = enc.submit(lambda o: writer.write(cv2.resize(o, (W, H // 2), interpolation=cv2.INTER_AREA)), out)
         torch.cuda.synchronize()
         frame_ms.append((time.perf_counter() - t0) * 1000.0)
         # outputs for correctness checks (not timed)
@@ -115,6 +126,8 @@ def main():
                                 hL=r["hL"], hR=r["hR"])
         if t in keys:
             cv2.imwrite(os.path.join(args.out, f"key_{t:04d}.png"), r["out"])
+    if pending is not None:
+        pending.result()
     writer.release()
     mon.stop()
 

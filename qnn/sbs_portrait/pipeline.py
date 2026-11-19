@@ -7,6 +7,7 @@ Evaluation (multi-config comparison, consistency metrics) lives in eval_alpha.py
 runs offline on dumped alphas, so it is not on the latency path.
 """
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import cv2
@@ -68,8 +69,10 @@ class Timer:
 class SBSPortraitPipeline:
     def __init__(self, first_frame, bg_sbs, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS,
                  work_scale=0.5, soft=(0.4, 0.6), gf=(4, 1e-4), lam=0.7, gate=0.5, bg_margin=4.0,
-                 precision="fp16", backbone="trt", post="gpu", timer=None):
-        """post: "gpu" (torch post-processing + compositing, see gpu_post.py) or "cpu" (reference)."""
+                 precision="fp16", backbone="trt", post="gpu", overlap=True, timer=None):
+        """post: "gpu" (torch post-processing + compositing, see gpu_post.py) or "cpu" (reference).
+        overlap: run the CPU geometry (downscale, SGBM, DIS) in a worker thread while the GPU
+        segments the same frame (OpenCV and CUDA waits release the GIL)."""
         self.timer = timer or Timer()
         self.soft, self.gf = soft, gf
         L0, R0 = split_sbs(first_frame)
@@ -106,6 +109,7 @@ class SBSPortraitPipeline:
         self.bgL, self.bgR = bgL, bgR
         self.prev_g = None
         self.post = post
+        self.pool = ThreadPoolExecutor(1, thread_name_prefix="geometry") if overlap else None
         if post == "gpu":
             self.gp = GPUPost(ws, bgL, bgR, soft=soft, gf=gf, lam=lam, gate=gate, person_disp=self.person_disp)
 
@@ -184,20 +188,12 @@ class SBSPortraitPipeline:
         validity, disparity fill, soft / guided / EMA / fusion, 1080p compositing."""
         tm, gp = self.timer, self.gp
         L, R = split_sbs(frame)
+        geo = self.pool.submit(self.cpu_geometry, L, R) if self.pool else None
         with tm("gpu.upload_frame"):
             frame_t = gp.pin.up("frame", frame)
         pL, hL, pR, hR = self.segment_eyes(L, R, gpu=True)
-        with tm("geo.downscale"):
-            gL = cv2.cvtColor(down(L, self.ws), cv2.COLOR_BGR2GRAY)
-            gR = cv2.cvtColor(down(R, self.ws), cv2.COLOR_BGR2GRAY)
-        with tm("geo.disparity"):
-            dL, dR = self.stereo(gL, gR)
-        with tm("geo.flow"):
-            flows = None
-            if self.prev_g is not None:
-                pgL, pgR = self.prev_g
-                flows = (self.flow(gL, pgL), self.flow(pgL, gL), self.flow(gR, pgR), self.flow(pgR, gR))
-        self.prev_g = (gL, gR)
+        with tm("geo.wait"):  # time the GPU path waits for the CPU geometry (0 when fully hidden)
+            gL, gR, dL, dR, flows = geo.result() if geo else self.cpu_geometry(L, R)
         with tm("gpu.post", gpu=True):
             up = gp.pin.up
             gLt, gRt = up("gL", gL).float(), up("gR", gR).float()
@@ -217,6 +213,22 @@ class SBSPortraitPipeline:
         with tm("gpu.compose+d2h", gpu=True):
             out = gp.pin.down("out", gp.compose(frame_t, aL, aR))
         return {"out": out, "aL": aL, "aR": aR, "pL": pL, "pR": pR, "hL": hL, "hR": hR}
+
+    def cpu_geometry(self, L, R):
+        """Gray work-res images, SGBM disparities and raw DIS flows (fw + bw) for both eyes."""
+        tm = self.timer
+        with tm("geo.downscale"):
+            gL = cv2.cvtColor(down(L, self.ws), cv2.COLOR_BGR2GRAY)
+            gR = cv2.cvtColor(down(R, self.ws), cv2.COLOR_BGR2GRAY)
+        with tm("geo.disparity"):
+            dL, dR = self.stereo(gL, gR)
+        with tm("geo.flow"):
+            flows = None
+            if self.prev_g is not None:
+                pgL, pgR = self.prev_g
+                flows = (self.flow(gL, pgL), self.flow(pgL, gL), self.flow(gR, pgR), self.flow(pgR, gR))
+        self.prev_g = (gL, gR)
+        return gL, gR, dL, dR, flows
 
     def process_cpu(self, frame):
         L, R = split_sbs(frame)
