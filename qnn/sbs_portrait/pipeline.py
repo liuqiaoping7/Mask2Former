@@ -67,7 +67,7 @@ class Timer:
 class SBSPortraitPipeline:
     def __init__(self, first_frame, bg_sbs, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS,
                  work_scale=0.5, soft=(0.4, 0.6), gf=(4, 1e-4), lam=0.7, gate=0.5, bg_margin=4.0,
-                 timer=None):
+                 precision="fp16", timer=None):
         self.timer = timer or Timer()
         self.soft, self.gf = soft, gf
         L0, R0 = split_sbs(first_frame)
@@ -76,7 +76,7 @@ class SBSPortraitPipeline:
         self.ws = ws = (int(W * work_scale), int(H * work_scale))
         s = work_scale
 
-        self.seg = PersonSegmenter(config_file, weights)
+        self.seg = PersonSegmenter(config_file, weights, precision=precision)
         for _ in range(2):  # warm-up
             self.segment_eyes(L0, R0, record=False)
 

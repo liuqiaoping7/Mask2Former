@@ -25,7 +25,10 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 
 
 class PersonSegmenter:
-    def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=()):
+    def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32"):
+        """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the model (the MSDeformAttn
+        pixel decoder forces FP32 internally; TF32 matmul is enabled for it) and FP16 person
+        post-processing in person()."""
         cfg = get_cfg()
         add_deeplab_config(cfg)
         add_maskformer2_config(cfg)
@@ -42,6 +45,11 @@ class PersonSegmenter:
         DetectionCheckpointer(self.model).load(weights)
         self.aug = T.ResizeShortestEdge([cfg.INPUT.MIN_SIZE_TEST] * 2, cfg.INPUT.MAX_SIZE_TEST)
         self.fmt = cfg.INPUT.FORMAT
+        assert precision in ("fp32", "fp16")
+        self.fp16 = precision == "fp16"
+        if self.fp16:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
     def preprocess(self, im):
         """BGR HxWx3 uint8 -> model input CHW uint8 tensor (shortest edge = MIN_SIZE_TEST).
@@ -113,12 +121,14 @@ class PersonSegmenter:
         with tm("seg.preprocess"):
             xs = [self.preprocess(im) for im in imgs_bgr]
             sizes = [tuple(x.shape[-2:]) for x in xs]
+        pdt = torch.float16 if self.fp16 else torch.float32
         with tm("seg.model", gpu=True):
             ims = [(x.to(m.device, non_blocking=True).float() - m.pixel_mean) / m.pixel_std for x in xs]
             il = ImageList.from_tensors(ims, m.size_divisibility)
-            out = m.sem_seg_head(m.backbone(il.tensor))
-        cls_all = out["pred_logits"].float().softmax(-1)  # B, Q, C+1
-        masks = out["pred_masks"].float()                   # B, Q, Hp/4, Wp/4
+            with torch.autocast("cuda", dtype=torch.float16, enabled=self.fp16):
+                out = m.sem_seg_head(m.backbone(il.tensor))
+        cls_all = out["pred_logits"].float().softmax(-1)  # B, Q, C+1 (tiny, keep FP32)
+        masks = out["pred_masks"].to(pdt)                   # B, Q, Hp/4, Wp/4
         num_classes = cls_all.shape[-1] - 1
         Hp, Wp = il.tensor.shape[-2:]
         ow, oh = out_size
@@ -131,16 +141,16 @@ class PersonSegmenter:
                 ys = (torch.arange(oh, device=masks.device, dtype=torch.float32) + 0.5) * (h / oh) * (h4 / Hp)
                 xs_ = (torch.arange(ow, device=masks.device, dtype=torch.float32) + 0.5) * (w / ow) * (w4 / Wp)
                 gy, gx = torch.meshgrid(ys / h4 * 2 - 1, xs_ / w4 * 2 - 1, indexing="ij")
-                grid = torch.stack([gx, gy], -1)[None]
-                mk = F.grid_sample(masks[b:b + 1], grid, mode="bilinear", align_corners=False)[0].sigmoid()  # Q,oh,ow
+                grid = torch.stack([gx, gy], -1)[None].to(pdt)
+                mk = F.grid_sample(masks[b:b + 1], grid, mode="bilinear", align_corners=False)[0].sigmoid_()  # Q,oh,ow
                 cls = cls_all[b]
-                wts = torch.stack([cls[:, PERSON_ID], 1.0 - cls[:, -1]])          # 2, Q
-                num, den = (wts @ mk.flatten(1)).view(2, oh, ow)
+                wts = torch.stack([cls[:, PERSON_ID], 1.0 - cls[:, -1]]).to(pdt)  # 2, Q
+                num, den = (wts @ mk.flatten(1)).float().view(2, oh, ow)
                 prob = num / den.clamp_min(1e-6)
                 # panoptic person mask, vectorised
                 scores, labels = cls.max(-1)
                 keep = labels.ne(num_classes) & (scores > m.object_mask_threshold)
-                ids = ((scores * keep)[:, None, None] * mk).argmax(0)               # oh, ow
+                ids = ((scores * keep).to(pdt)[:, None, None] * mk).argmax(0)       # oh, ow
                 own = mk >= 0.5
                 own_at = own.gather(0, ids[None])[0]
                 flat = ids.flatten()
