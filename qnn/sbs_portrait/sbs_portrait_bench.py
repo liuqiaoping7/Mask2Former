@@ -5,6 +5,9 @@ Input : a directory of full side-by-side frames (left | right, each eye 1080p)
 Output: SBS composites (video + key frames), per-config temporal / stereo
         consistency metrics and latency (metrics.json / metrics.md).
 
+Background depth placement: the right view of the virtual background is shifted
+so that its disparity stays below the person's (background behind the person).
+
 Configs (alpha generation, all evaluated on the same frames in one pass):
   raw        panoptic person mask per eye, per frame (hard 0/1) -- baseline
   soft       semantic person probability -> smoothstep alpha
@@ -84,6 +87,9 @@ def main():
     ap.add_argument("--cache", default="", help="dir to cache per-frame segmentation (reuse across runs)")
     ap.add_argument("--soft", default="0.3,0.7", help="smoothstep range prob -> alpha")
     ap.add_argument("--lam", type=float, default=0.7, help="temporal EMA strength")
+    ap.add_argument("--bg-margin", type=float, default=4.0,
+                    help="px (full res) the background must stay behind the person's nearest disparity")
+    ap.add_argument("--no-bg-shift", action="store_true", help="disable background depth placement")
     ap.add_argument("--save-frames", default="0,75,149")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -117,9 +123,25 @@ def main():
 
     bgL, bgR = split_sbs(cv2.imread(args.bg))
     bgL, bgR = down(bgL, (W, H), cv2.INTER_LINEAR), down(bgR, (W, H), cv2.INTER_LINEAR)
+    gbL, gbR = [cv2.cvtColor(down(x, ws), cv2.COLOR_BGR2GRAY) for x in (bgL, bgR)]
+    bmin, bnum, bdy, _ = ts.estimate_disparity_range(gbL, gbR)
+    bd_l, _ = ts.StereoEstimator(bmin, bnum)(gbL, gbR)
+
+    # background depth placement: keep background disparity below the person's (frame 0)
+    s = args.work_scale
+    _, h0 = segment([L0])[0]
+    dL0, _ = stereo(gL0, gR0)
+    core = cv2.erode(down(h0.astype(np.uint8), ws, cv2.INTER_NEAREST), np.ones((9, 9), np.uint8)).astype(bool)
+    pct = lambda d: {f"p{q}": nanpct(d, q, 0.0) / s for q in (5, 50, 95)}
+    person_d, bg_d = pct(dL0[core]), pct(bd_l)
+    shift = 0.0 if args.no_bg_shift else max(0.0, bg_d["p95"] - person_d["p5"] + args.bg_margin)
+    if shift > 0:  # move the right view to the right -> disparity decreases -> further away
+        bgR = ts.warp_h(bgR, np.full((H, W), -shift, np.float32))
     bgL_w, bgR_w = down(bgL, ws), down(bgR, ws)
     stereo_info = {"pair_disp_range_work": [min_d, min_d + num_d], "vertical_offset_px_work": dy,
-                   "orb_matches": nmatch}
+                   "orb_matches": nmatch, "person_disp_full": person_d, "bg_disp_full": bg_d,
+                   "bg_shift_px_full": shift, "bg_disp_range_work": [bmin, bmin + bnum],
+                   "bg_vertical_offset_px_work": bdy}
     print("stereo:", json.dumps(stereo_info), flush=True)
 
     # ---------------- state ----------------
@@ -133,7 +155,7 @@ def main():
     writers = {c: cv2.VideoWriter(os.path.join(args.out, f"composite_{c}.mp4"), fourcc, 30, (W, H // 2))
                for c in VIDEO_CONFIGS}
     prev_g = None
-    last_person_disp = 0.0
+    last_person_disp = person_d["p50"] * s
 
     for t, f in enumerate(files):
         frame = f0 if t == 0 else cv2.imread(f)
