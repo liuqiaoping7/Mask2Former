@@ -38,3 +38,12 @@ python sbs_portrait_bench.py --frames ~/data/sbs/portrait_0121 --bg ~/data/sbs/b
 - `--cache` 缓存逐帧分割结果（含分割耗时），调后处理时不必重复推理。
 - 默认逐眼推理（Swin-L 在 8 GB 显存上无法双眼 batch）；显存足够时加 `--batch-eyes`。
 - 各配置含义见 `sbs_portrait_bench.py` 文件头；`results/` 为当前提交在 RTX 4060 上的实测结果。
+
+## 生产流水线与优化测量
+
+`sbs_portrait_bench.py` 每帧要算 6 个对比配置和全部一致性指标，用于算法对比；部署只走 final 一条路径：
+
+- `pipeline.py`：生产流水线（分割 → 视差/光流 → soft → 引导滤波 → 时域 EMA → 立体融合 → 1080p 合成），逐模块计时。
+- `run_pipeline.py`：端到端延迟、逐模块耗时（`--profile` 时 GPU 模块前后同步）、NVML 显存峰值、RSS 峰值；`--dump` 保存逐帧 alpha 供离线评估。
+- `eval_alpha.py`：离线计算 3D 质量指标，并与参考运行（基线）对比 alpha 误差和关键帧 PSNR。
+- `opt_step.sh <name>`：一次优化的标准测量流程，结果写入 `results/opt/<name>/`。

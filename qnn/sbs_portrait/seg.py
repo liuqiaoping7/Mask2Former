@@ -1,4 +1,5 @@
 """Mask2Former person segmenter for SBS eyes (official panoptic + semantic inference)."""
+import contextlib
 import os
 import sys
 
@@ -42,29 +43,40 @@ class PersonSegmenter:
         self.fmt = cfg.INPUT.FORMAT
 
     @torch.no_grad()
-    def __call__(self, imgs_bgr):
+    def __call__(self, imgs_bgr, timer=None):
         """imgs_bgr: list of HxWx3 uint8 BGR (processed as one batch).
 
         Returns list of (prob, hard): prob = person share of the semantic score
         (float32 HxW in [0,1]); hard = union of panoptic person segments (bool).
+        timer: optional pipeline.Timer, records seg.preprocess / seg.model / seg.person / seg.d2h.
         """
-        inputs = []
-        for im in imgs_bgr:
-            x = im[:, :, ::-1] if self.fmt == "RGB" else im
-            h, w = x.shape[:2]
-            x = self.aug.get_transform(x).apply_image(x)
-            inputs.append({"image": torch.as_tensor(np.ascontiguousarray(x.transpose(2, 0, 1))),
-                           "height": h, "width": w})
-        outs = self.model(inputs)
+        tm = timer or _NullTimer()
+        with tm("seg.preprocess"):
+            inputs = []
+            for im in imgs_bgr:
+                x = im[:, :, ::-1] if self.fmt == "RGB" else im
+                h, w = x.shape[:2]
+                x = self.aug.get_transform(x).apply_image(x)
+                inputs.append({"image": torch.as_tensor(np.ascontiguousarray(x.transpose(2, 0, 1))),
+                               "height": h, "width": w})
+        with tm("seg.model", gpu=True):
+            outs = self.model(inputs)
         res = []
         for o in outs:
-            sem = o["sem_seg"].float()
-            prob = sem[PERSON_ID] / sem.sum(0).clamp_min(1e-6)
-            pan, info = o["panoptic_seg"]
-            ids = [s["id"] for s in info if s.get("isthing") and s["category_id"] == PERSON_ID]
-            if ids:
-                hard = torch.isin(pan, torch.tensor(ids, device=pan.device))
-            else:
-                hard = torch.zeros_like(pan, dtype=torch.bool)
-            res.append((prob.cpu().numpy().astype(np.float32), hard.cpu().numpy()))
+            with tm("seg.person", gpu=True):
+                sem = o["sem_seg"].float()
+                prob = sem[PERSON_ID] / sem.sum(0).clamp_min(1e-6)
+                pan, info = o["panoptic_seg"]
+                ids = [s["id"] for s in info if s.get("isthing") and s["category_id"] == PERSON_ID]
+                if ids:
+                    hard = torch.isin(pan, torch.tensor(ids, device=pan.device))
+                else:
+                    hard = torch.zeros_like(pan, dtype=torch.bool)
+            with tm("seg.d2h", gpu=True):
+                res.append((prob.cpu().numpy().astype(np.float32), hard.cpu().numpy()))
         return res
+
+
+class _NullTimer:
+    def __call__(self, key, gpu=False):
+        return contextlib.nullcontext()
