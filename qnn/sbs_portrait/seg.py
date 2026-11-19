@@ -116,7 +116,7 @@ class PersonSegmenter:
 
 
     @torch.no_grad()
-    def person(self, imgs_bgr, out_size, timer=None, return_numpy=True):
+    def person(self, imgs_bgr, out_size, timer=None, return_numpy=True, pre=None):
         """Person-only inference evaluated directly at out_size=(w, h) (e.g. 960x540).
 
         Same model forward as __call__, but replaces the official post-processing
@@ -132,11 +132,14 @@ class PersonSegmenter:
             score * mask; valid if area / own_area >= OVERLAP_THRESHOLD), no host syncs.
         Returns list of (prob float32 HxW, hard bool HxW) at out_size: numpy arrays, or CUDA
         tensors ready on the caller's current stream when return_numpy=False.
+        pre: already preprocessed inputs (list of self.preprocess(img)); imgs_bgr is then unused.
         """
         tm = timer or _NullTimer()
-        with tm("seg.preprocess"):
-            xs = [self.preprocess(im) for im in imgs_bgr]
-            sizes = [tuple(x.shape[-2:]) for x in xs]
+        if pre is None:
+            with tm("seg.preprocess"):
+                pre = [self.preprocess(im) for im in imgs_bgr]
+        xs = pre
+        sizes = [tuple(x.shape[-2:]) for x in xs]
         pdt = torch.float16 if self.fp16 else torch.float32
         caller = torch.cuda.current_stream()
         with torch.cuda.stream(self.stream):

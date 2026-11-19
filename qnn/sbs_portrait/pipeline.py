@@ -114,7 +114,7 @@ class SBSPortraitPipeline:
             self.gp = GPUPost(ws, bgL, bgR, soft=soft, gf=gf, lam=lam, gate=gate, person_disp=self.person_disp)
 
     # ------------------------------------------------------------------ stages
-    def segment_eyes(self, L, R, record=True, gpu=False):
+    def segment_eyes(self, L, R, record=True, gpu=False, pre=None):
         """Person prob / hard mask for both eyes at work resolution (numpy).
 
         Person-only inference evaluated directly on the work grid (seg.person), instead of
@@ -123,7 +123,8 @@ class SBSPortraitPipeline:
         tm = self.timer if record else Timer()
         out = []
         for eye in (L, R):
-            prob, hard = self.seg.person([eye], self.ws, timer=tm, return_numpy=not gpu)[0]
+            p = [pre[len(out) // 2]] if pre is not None else None
+            prob, hard = self.seg.person([eye], self.ws, timer=tm, return_numpy=not gpu, pre=p)[0]
             out += [prob, hard]
         return out  # pL, hL, pR, hR
 
@@ -188,10 +189,14 @@ class SBSPortraitPipeline:
         validity, disparity fill, soft / guided / EMA / fusion, 1080p compositing."""
         tm, gp = self.timer, self.gp
         L, R = split_sbs(frame)
+        # model-input resize first: it is on the critical path and would otherwise compete with
+        # the geometry thread for the OpenCV thread pool
+        with tm("seg.preprocess"):
+            pre = [self.seg.preprocess(L), self.seg.preprocess(R)]
         geo = self.pool.submit(self.cpu_geometry, L, R) if self.pool else None
         with tm("gpu.upload_frame"):
             frame_t = gp.pin.up("frame", frame)
-        pL, hL, pR, hR = self.segment_eyes(L, R, gpu=True)
+        pL, hL, pR, hR = self.segment_eyes(L, R, gpu=True, pre=pre)
         with tm("geo.wait"):  # time the GPU path waits for the CPU geometry (0 when fully hidden)
             gL, gR, dL, dR, flows = geo.result() if geo else self.cpu_geometry(L, R)
         with tm("gpu.post", gpu=True):
