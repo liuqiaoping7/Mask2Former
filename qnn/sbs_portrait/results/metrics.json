@@ -16,7 +16,8 @@
   "weights": "/home/qiao/Documents/github/Mask2Former/weights/model_final_f07440.pkl",
   "max_frames": 150,
   "work_scale": 0.5,
-  "batch_eyes": false
+  "batch_eyes": false,
+  "soft": "0.3,0.7"
  },
  "stereo": {
   "pair_disp_range_work": [
@@ -28,9 +29,10 @@
  },
  "latency_ms": {
   "seg_LR": 1008.9237960000901,
-  "disparity_LR": 26.830511500520515,
-  "flow_LR": 97.65384849924885,
-  "post_raw": 0.30815349964541383
+  "disparity_LR": 27.454436998596066,
+  "flow_LR": 97.6601269976527,
+  "post_raw": 0.3056785008084262,
+  "post_soft": 2.0810419991903473
  },
  "configs": {
   "raw": {
@@ -43,8 +45,21 @@
    "fid_iou": 1.0,
    "ghost": 0.00805334335330369,
    "cwarp": 3.5520210618140715,
-   "post_ms": 0.30815349964541383,
-   "latency_ms": 1009.2319494997355
+   "post_ms": 0.3056785008084262,
+   "latency_ms": 1009.2294745008985
+  },
+  "soft": {
+   "tiou": 0.9900915212245853,
+   "tiou_p5": 0.9811981659529135,
+   "tflk_band": 0.02711095649048986,
+   "siou": 0.9841612972705379,
+   "siou_p5": 0.9715158842992193,
+   "sflk_band": 0.04105096233387788,
+   "fid_iou": 0.9696766334608621,
+   "ghost": 0.0,
+   "cwarp": 3.5010738996851365,
+   "post_ms": 2.0810419991903473,
+   "latency_ms": 1011.0048379992804
   }
  }
 }
