@@ -89,9 +89,10 @@ def main():
     ap.add_argument("--batch-eyes", action="store_true",
                     help="segment both eyes in one batch (default: one eye at a time, fits Swin-L in 8 GB)")
     ap.add_argument("--cache", default="", help="dir to cache per-frame segmentation (reuse across runs)")
-    ap.add_argument("--soft", default="0.3,0.7", help="smoothstep range prob -> alpha")
+    ap.add_argument("--soft", default="0.4,0.6", help="smoothstep range prob -> alpha")
     ap.add_argument("--lam", type=float, default=0.7, help="temporal EMA strength")
-    ap.add_argument("--gf", default="8,1e-3", help="guided filter radius,eps (work resolution)")
+    ap.add_argument("--gf", default="4,1e-4", help="guided filter radius,eps (work resolution)")
+    ap.add_argument("--gate", type=float, default=0.5, help="temporal EMA motion gate (0 = off)")
     ap.add_argument("--bg-margin", type=float, default=4.0,
                     help="px (full res) the background must stay behind the person's nearest disparity")
     ap.add_argument("--no-bg-shift", action="store_true", help="disable background depth placement")
@@ -152,7 +153,7 @@ def main():
 
     # ---------------- state ----------------
     acc = {c: ts.MetricAccumulator() for c in CONFIGS}
-    ema = {k: ts.TemporalEMA(args.lam) for k in ("T_L", "T_R", "G_L", "G_R")}
+    ema = {k: ts.TemporalEMA(args.lam, gate=args.gate) for k in ("T_L", "T_R", "G_L", "G_R")}
     prev_alpha = {c: None for c in CONFIGS}
     prev_comp = {c: None for c in CONFIGS}
     flicker_map = {c: np.zeros(ws[::-1], np.float32) for c in FLICKER_MAP_CONFIGS}

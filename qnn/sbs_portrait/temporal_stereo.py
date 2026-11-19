@@ -163,11 +163,15 @@ class TemporalEMA:
     """Motion-compensated, confidence-weighted recursive filter.
 
     a_t = w * warp(a_{t-1}, flow) + (1 - w) * p_t
-    w   = lam * flow_valid * exp(-photo_err / sigma)
+    w   = lam * flow_valid * exp(-photo_err / sigma) * clip(1 - |p_t - warp(a_{t-1})| / gate, 0, 1)
+
+    The last term (motion gate) lets genuine changes (fast arm motion, flow
+    failure) pass through immediately, so the history does not leave trails,
+    while small boundary jitter is still damped.  gate=None disables it.
     """
 
-    def __init__(self, lam=0.7, sigma=10.0):
-        self.lam, self.sigma, self.prev = lam, sigma, None
+    def __init__(self, lam=0.7, sigma=10.0, gate=None):
+        self.lam, self.sigma, self.gate, self.prev = lam, sigma, gate, None
 
     def __call__(self, p, flow_b, valid, photo):
         if self.prev is None or flow_b is None:
@@ -175,6 +179,8 @@ class TemporalEMA:
             return p
         prev_w = warp_flow(self.prev, flow_b)
         w = self.lam * valid.astype(np.float32) * np.exp(-photo / self.sigma)
+        if self.gate:
+            w = w * np.clip(1.0 - np.abs(p - prev_w) / self.gate, 0.0, 1.0)
         a = w * prev_w + (1.0 - w) * p
         self.prev = a
         return a
