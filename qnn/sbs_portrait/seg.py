@@ -26,13 +26,15 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 
 class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
-                 backbone="torch", eye_hw=(1080, 1920), trt_plan=None):
+                 backbone="torch", eye_hw=(1080, 1920), trt_plan=None, fused=True):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
         backbone: "torch" or "trt" -- static-shape TensorRT FP16 engine for the backbone, used by
         person() (built on first use for eyes of size eye_hw; the torch backbone weights are
-        then released). With "trt" only person() is available."""
+        then released). With "trt" only person() is available.
+        fused: person() post-processing with the fused Triton kernel (person_triton.py) instead
+        of the grid_sample / matmul / argmax torch ops."""
         cfg = get_cfg()
         add_deeplab_config(cfg)
         add_maskformer2_config(cfg)
@@ -56,6 +58,7 @@ class PersonSegmenter:
             torch.backends.cudnn.allow_tf32 = True
             _enable_pixel_decoder_fp16(self.model)
         self.stream = torch.cuda.Stream()
+        self.fused = fused
         self.trt = None
         if backbone == "trt":
             from trt_backbone import TRTBackbone, build_engine
@@ -83,6 +86,20 @@ class PersonSegmenter:
         if self.fmt == "RGB":
             x = x[:, :, ::-1]
         return torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)))
+
+    def _person_fused(self, masks, cls, hw, padded_hw, out_hw):
+        from person_triton import fused_person
+
+        m = self.model
+        (h, w), (Hp, Wp), (oh, ow) = hw, padded_hw, out_hw
+        h4, w4 = masks.shape[-2:]
+        num_classes = cls.shape[-1] - 1
+        scores, labels = cls.max(-1)
+        keep = labels.ne(num_classes) & (scores > m.object_mask_threshold)
+        prob, ids, own_at, own_area = fused_person(
+            masks, cls[:, PERSON_ID], 1.0 - cls[:, -1], scores * keep, (oh, ow),
+            (h / oh) * (h4 / Hp), (w / ow) * (w4 / Wp))
+        return prob, _panoptic_person_rule(m, scores, keep, labels, ids, own_at, own_area)
 
     @torch.no_grad()
     def __call__(self, imgs_bgr, timer=None):
@@ -168,6 +185,15 @@ class PersonSegmenter:
         ow, oh = out_size
         res = []
         for b, (h, w) in enumerate(sizes):
+            if self.fused:
+                with tm("seg.person", gpu=True):
+                    prob, hard = self._person_fused(masks[b], cls_all[b], (h, w), (Hp, Wp), (oh, ow))
+                if return_numpy:
+                    with tm("seg.d2h", gpu=True):
+                        res.append((prob.cpu().numpy(), hard.cpu().numpy()))
+                else:
+                    res.append((prob, hard))
+                continue
             with tm("seg.person", gpu=True):
                 h4, w4 = masks.shape[-2:]
                 # continuous mask-grid coordinate of each output pixel centre (official geometry:
@@ -260,6 +286,17 @@ def _enable_pixel_decoder_fp16(model):
         msda_mod._fp32_wrapped = True
     pd = model.sem_seg_head.pixel_decoder
     pd.forward_features = types.MethodType(_pixel_decoder_fp16_forward_features, pd)
+
+
+def _panoptic_person_rule(model, scores, keep, labels, ids, own_at, own_area):
+    """Vectorised Mask2Former panoptic rule restricted to the person class (no host syncs)."""
+    q = scores.shape[0]
+    flat = ids.flatten()
+    area = torch.zeros(q, device=ids.device).scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.float32))
+    seg_area = torch.zeros(q, device=ids.device).scatter_add_(0, flat, own_at.flatten().float())
+    valid = keep & (area > 0) & (own_area > 0) & (seg_area > 0) & \
+        (area >= model.overlap_threshold * own_area) & labels.eq(PERSON_ID)
+    return valid[ids] & own_at
 
 
 class _NullTimer:
