@@ -8,6 +8,7 @@ Output: SBS composites (video + key frames), per-config temporal / stereo
 Configs (alpha generation, all evaluated on the same frames in one pass):
   raw        panoptic person mask per eye, per frame (hard 0/1) -- baseline
   soft       semantic person probability -> smoothstep alpha
+  soft+T     + motion-compensated confidence-weighted temporal EMA (per eye)
 """
 import argparse
 import json
@@ -22,13 +23,13 @@ import torch
 import temporal_stereo as ts
 from seg import DEFAULT_CONFIG, DEFAULT_WEIGHTS, PersonSegmenter
 
-CONFIGS = ["raw", "soft"]
+CONFIGS = ["raw", "soft", "soft+T"]
 VIDEO_CONFIGS = ["raw"]
 FLICKER_MAP_CONFIGS = ["raw"]
 # timer keys that make up each config's post-processing latency
-POST_KEYS = {"raw": ["post_raw"], "soft": ["post_soft"]}
+POST_KEYS = {"raw": ["post_raw"], "soft": ["post_soft"], "soft+T": ["post_soft", "post_soft+T"]}
 # configs whose post-processing needs optical flow / disparity
-USES_GEOMETRY = set()
+USES_GEOMETRY = {"soft+T"}
 
 
 def split_sbs(img):
@@ -79,6 +80,7 @@ def main():
                     help="segment both eyes in one batch (default: one eye at a time, fits Swin-L in 8 GB)")
     ap.add_argument("--cache", default="", help="dir to cache per-frame segmentation (reuse across runs)")
     ap.add_argument("--soft", default="0.3,0.7", help="smoothstep range prob -> alpha")
+    ap.add_argument("--lam", type=float, default=0.7, help="temporal EMA strength")
     ap.add_argument("--save-frames", default="0,75,149")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -119,6 +121,7 @@ def main():
 
     # ---------------- state ----------------
     acc = {c: ts.MetricAccumulator() for c in CONFIGS}
+    ema = {k: ts.TemporalEMA(args.lam) for k in ("T_L", "T_R")}
     prev_alpha = {c: None for c in CONFIGS}
     prev_comp = {c: None for c in CONFIGS}
     flicker_map = {c: np.zeros(ws[::-1], np.float32) for c in FLICKER_MAP_CONFIGS}
@@ -179,6 +182,12 @@ def main():
         sL, sR = ts.soft_alpha(pL, soft_lo, soft_hi), ts.soft_alpha(pR, soft_lo, soft_hi)
         alphas["soft"] = (sL, sR)
         timer.add("post_soft", time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        tL = ema["T_L"](sL, fbL, vL, phL)
+        tR = ema["T_R"](sR, fbR, vR, phR)
+        alphas["soft+T"] = (tL, tR)
+        timer.add("post_soft+T", time.perf_counter() - t0)
 
         # ---------------- metrics ----------------
         bandL_m, bandR_m = ts.boundary_band(hL, 10), ts.boundary_band(hR, 10)

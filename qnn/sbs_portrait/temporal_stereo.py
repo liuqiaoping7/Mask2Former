@@ -129,6 +129,27 @@ def soft_alpha(prob, lo=0.3, hi=0.7):
     return t * t * (3 - 2 * t)
 
 
+class TemporalEMA:
+    """Motion-compensated, confidence-weighted recursive filter.
+
+    a_t = w * warp(a_{t-1}, flow) + (1 - w) * p_t
+    w   = lam * flow_valid * exp(-photo_err / sigma)
+    """
+
+    def __init__(self, lam=0.7, sigma=10.0):
+        self.lam, self.sigma, self.prev = lam, sigma, None
+
+    def __call__(self, p, flow_b, valid, photo):
+        if self.prev is None or flow_b is None:
+            self.prev = p
+            return p
+        prev_w = warp_flow(self.prev, flow_b)
+        w = self.lam * valid.astype(np.float32) * np.exp(-photo / self.sigma)
+        a = w * prev_w + (1.0 - w) * p
+        self.prev = a
+        return a
+
+
 # ----------------------------------------------------------------------------
 # metrics
 # ----------------------------------------------------------------------------
