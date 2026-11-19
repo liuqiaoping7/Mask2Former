@@ -1,0 +1,109 @@
+{
+ "cpu.imread_jpeg_decode": {
+  "mean_ms_per_frame": 21.1478363999845,
+  "calls": 10
+ },
+ "cpu.seg_preprocess(resize+chw)": {
+  "mean_ms_per_frame": 37.69625249996125,
+  "calls": 20
+ },
+ "gpu.backbone": {
+  "mean_ms_per_frame": 31.51105820002158,
+  "calls": 20
+ },
+ "gpu.pixel_decoder(msda)": {
+  "mean_ms_per_frame": 643.4072697000147,
+  "calls": 20
+ },
+ "gpu.transformer_decoder": {
+  "mean_ms_per_frame": 111.07548490000454,
+  "calls": 20
+ },
+ "gpu.post.mask_upsample_to_input": {
+  "mean_ms_per_frame": 0.030632200002855825,
+  "calls": 20
+ },
+ "gpu.post.upsample_crop_to_1080p": {
+  "mean_ms_per_frame": 0.05987370002458192,
+  "calls": 20
+ },
+ "gpu.post.semantic_inference": {
+  "mean_ms_per_frame": 0.16172599998753867,
+  "calls": 20
+ },
+ "gpu.post.panoptic_inference": {
+  "mean_ms_per_frame": 171.343070599994,
+  "calls": 20
+ },
+ "gpu.model_total": {
+  "mean_ms_per_frame": 960.0826552000174,
+  "calls": 20
+ },
+ "gpu.person_prob+isin": {
+  "mean_ms_per_frame": 9.17032150000523,
+  "calls": 20
+ },
+ "d2h.prob+mask(.cpu)": {
+  "mean_ms_per_frame": 6.683062800004791,
+  "calls": 20
+ },
+ "cpu.downscale_inputs+gray": {
+  "mean_ms_per_frame": 1.8448397000156547,
+  "calls": 10
+ },
+ "cpu.downscale_masks_1080p->540p": {
+  "mean_ms_per_frame": 1.840622299982897,
+  "calls": 10
+ },
+ "cpu.sgbm_disparity_LR+check": {
+  "mean_ms_per_frame": 29.804553600001782,
+  "calls": 10
+ },
+ "cpu.dis_flow_LR(fw+bw)+validity": {
+  "mean_ms_per_frame": 101.23500930000091,
+  "calls": 10
+ },
+ "cpu.disparity_fill(morph+pct)": {
+  "mean_ms_per_frame": 9.949977099972784,
+  "calls": 10
+ },
+ "cpu.final.soft_alpha": {
+  "mean_ms_per_frame": 2.1687052000174845,
+  "calls": 10
+ },
+ "cpu.final.guided_filter_LR": {
+  "mean_ms_per_frame": 11.902786400003151,
+  "calls": 10
+ },
+ "cpu.final.temporal_ema_LR": {
+  "mean_ms_per_frame": 7.733191399984207,
+  "calls": 10
+ },
+ "cpu.final.stereo_fusion_LR": {
+  "mean_ms_per_frame": 1.8488469000089935,
+  "calls": 10
+ },
+ "cpu.final.compose_1080p_LR+encode": {
+  "mean_ms_per_frame": 78.17499459997634,
+  "calls": 10
+ },
+ "bench.other_configs_alpha": {
+  "mean_ms_per_frame": 11.798553500000253,
+  "calls": 10
+ },
+ "bench.metrics_6configs": {
+  "mean_ms_per_frame": 166.20688679997784,
+  "calls": 10
+ },
+ "bench.raw_compose+encode": {
+  "mean_ms_per_frame": 77.05894809997744,
+  "calls": 10
+ },
+ "_wall_ms_per_frame": 1536.5288193999845,
+ "_wall_ms_std": 9.590247215989688
+}
+Collecting data...
+Generating '/tmp/nsys-report-4142.qdstrm'
+[1/1] [0%                          ] pipe.nsys-rep[1/1] [0%                          ] pipe.nsys-rep[1/1] [0%                          ] pipe.nsys-rep[1/1] [0%                          ] pipe.nsys-rep[1/1] [14%                         ] pipe.nsys-rep[1/1] [13%                         ] pipe.nsys-rep[1/1] [12%                         ] pipe.nsys-rep[1/1] [===23%                      ] pipe.nsys-rep[1/1] [=====32%                    ] pipe.nsys-rep[1/1] [======33%                   ] pipe.nsys-rep[1/1] [======34%                   ] pipe.nsys-rep[1/1] [======35%                   ] pipe.nsys-rep[1/1] [=======36%                  ] pipe.nsys-rep[1/1] [=======37%                  ] pipe.nsys-rep[1/1] [=======38%                  ] pipe.nsys-rep[1/1] [=======39%                  ] pipe.nsys-rep[1/1] [========40%                 ] pipe.nsys-rep[1/1] [========41%                 ] pipe.nsys-rep[1/1] [========42%                 ] pipe.nsys-rep[1/1] [=========43%                ] pipe.nsys-rep[1/1] [=========44%                ] pipe.nsys-rep[1/1] [=========45%                ] pipe.nsys-rep[1/1] [=========46%                ] pipe.nsys-rep[1/1] [==========47%               ] pipe.nsys-rep[1/1] [==========48%               ] pipe.nsys-rep[1/1] [==========49%               ] pipe.nsys-rep[1/1] [===========50%              ] pipe.nsys-rep[1/1] [===========51%              ] pipe.nsys-rep[1/1] [===========52%              ] pipe.nsys-rep[1/1] [===========53%              ] pipe.nsys-rep[1/1] [============54%             ] pipe.nsys-rep[1/1] [============55%             ] pipe.nsys-rep[1/1] [============56%             ] pipe.nsys-rep[1/1] [============57%             ] pipe.nsys-rep[1/1] [=============58%            ] pipe.nsys-rep[1/1] [=============59%            ] pipe.nsys-rep[1/1] [=============60%            ] pipe.nsys-rep[1/1] [==============61%           ] pipe.nsys-rep[1/1] [==============62%           ] pipe.nsys-rep[1/1] [==============63%           ] pipe.nsys-rep[1/1] [==============64%           ] pipe.nsys-rep[1/1] [===============65%          ] pipe.nsys-rep[1/1] [===============66%          ] pipe.nsys-rep[1/1] [===============67%          ] pipe.nsys-rep[1/1] [================68%         ] pipe.nsys-rep[1/1] [================69%         ] pipe.nsys-rep[1/1] [================71%         ] pipe.nsys-rep[1/1] [=================74%        ] pipe.nsys-rep[1/1] [==================77%       ] pipe.nsys-rep[1/1] [===================80%      ] pipe.nsys-rep[1/1] [===================82%      ] pipe.nsys-rep[1/1] [====================85%     ] pipe.nsys-rep[1/1] [=====================88%    ] pipe.nsys-rep[1/1] [=====================89%    ] pipe.nsys-rep[1/1] [========================100%] pipe.nsys-rep[1/1] [========================100%] pipe.nsys-rep
+Generated:
+    /home/qiao/data/sbs/prof/pipe.nsys-rep

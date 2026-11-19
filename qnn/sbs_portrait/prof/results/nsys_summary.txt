@@ -1,0 +1,46 @@
+frames=10  wall=1536.6 ms  GPU busy=960.9 ms (62.5%)
+range                                    cpu wall ms   gpu ms  busy%  kernels  gap ms  >20us
+gpu.model_total                                960.1    948.1  98.8%     3794   24.30    178
+gpu.pixel_decoder(msda)                        643.4    639.4  99.4%     1932    8.54     94
+gpu.post.panoptic_inference                    171.3    167.9  98.0%      664    5.20     18
+bench.metrics_6configs                         166.2      0.0   0.0%        0    0.00      0
+gpu.transformer_decoder                        111.1    107.9  97.2%     1118    7.54     54
+cpu.dis_flow_LR(fw+bw)+validity                101.2      0.0   0.0%        0    0.00      0
+cpu.final.compose_1080p_LR+encode               78.2      0.0   0.0%        0    0.00      0
+bench.raw_compose+encode                        77.1      0.0   0.0%        0    0.00      0
+cpu.seg_preprocess(resize+chw)                  37.7      0.0   0.0%        0    0.00      0
+gpu.backbone                                    31.5     31.3  99.2%       66    1.88      6
+cpu.sgbm_disparity_LR+check                     29.8      0.0   0.0%        0    0.00      0
+cpu.imread_jpeg_decode                          21.1      0.0   0.0%        0    0.00      0
+cpu.final.guided_filter_LR                      11.9      0.0   0.0%        0    0.00      0
+bench.other_configs_alpha                       11.8      0.0   0.0%        0    0.00      0
+cpu.disparity_fill(morph+pct)                    9.9      0.0   0.0%        0    0.00      0
+gpu.person_prob+isin                             9.2      9.1  99.2%        8    0.04      0
+cpu.final.temporal_ema_LR                        7.7      0.0   0.0%        0    0.00      0
+d2h.prob+mask(.cpu)                              6.7      3.7  55.2%        2    0.00      0
+cpu.final.soft_alpha                             2.2      0.0   0.0%        0    0.00      0
+cpu.final.stereo_fusion_LR                       1.8      0.0   0.0%        0    0.00      0
+cpu.downscale_inputs+gray                        1.8      0.0   0.0%        0    0.00      0
+cpu.downscale_masks_1080p->540p                  1.8      0.0   0.0%        0    0.00      0
+gpu.post.semantic_inference                      0.2      0.2 100.0%        0    0.00      0
+gpu.post.upsample_crop_to_1080p                  0.1      0.1 100.0%        0    0.00      0
+gpu.post.mask_upsample_to_input                  0.0      0.0 100.0%        0    0.00      0
+memcpy HtoD: 24/frame, 6.0 MB/frame, 0.85 ms/frame, 7.1 GB/s
+memcpy DtoD: 96/frame, 2018.8 MB/frame, 12.62 ms/frame, 159.9 GB/s
+memcpy DtoH: 258/frame, 20.7 MB/frame, 3.55 ms/frame, 5.8 GB/s
+runtime cudaStreamSynchronize           282 calls/frame    898.9 ms/frame
+runtime cudaLaunchKernel*              3808 calls/frame     10.4 ms/frame
+runtime cudaMemcpyAsync                 378 calls/frame      6.3 ms/frame
+CPU samples in window: 22299  (by module)
+   32.4%  libcuda
+   26.5%  cv2.abi3
+   13.7%  _multiarray_umath.cpython-31
+   11.6%  [kernel.kallsyms]
+    5.3%  libgomp
+    3.9%  [vdso]
+    2.8%  libc
+    0.9%  _imaging.cpython-312-x86_64-
+    0.6%  python3.12
+    0.5%  libToolsInjection64
+    0.5%  libtorch_cpu
+    0.3%  libcupti
