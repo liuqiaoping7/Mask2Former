@@ -25,10 +25,14 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 
 
 class PersonSegmenter:
-    def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32"):
+    def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
+                 backbone="torch", eye_hw=(1080, 1920), trt_plan=None):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the model (the MSDeformAttn
         pixel decoder forces FP32 internally; TF32 matmul is enabled for it) and FP16 person
-        post-processing in person()."""
+        post-processing in person().
+        backbone: "torch" or "trt" -- static-shape TensorRT FP16 engine for the backbone, used by
+        person() (built on first use for eyes of size eye_hw; the torch backbone weights are
+        then released). With "trt" only person() is available."""
         cfg = get_cfg()
         add_deeplab_config(cfg)
         add_maskformer2_config(cfg)
@@ -50,6 +54,20 @@ class PersonSegmenter:
         if self.fp16:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+        self.stream = torch.cuda.Stream()
+        self.trt = None
+        if backbone == "trt":
+            from trt_backbone import TRTBackbone, build_engine
+            nh, nw = T.ResizeShortestEdge.get_output_shape(eye_hw[0], eye_hw[1], cfg.INPUT.MIN_SIZE_TEST,
+                                                           cfg.INPUT.MAX_SIZE_TEST)
+            d = self.model.size_divisibility
+            shape = (1, 3, -(-nh // d) * d, -(-nw // d) * d)
+            plan = trt_plan or os.path.join(REPO, "weights", f"swinl_backbone_fp16_{shape[2]}x{shape[3]}.plan")
+            if not os.path.exists(plan):
+                build_engine(self.model.backbone, plan, shape)
+            self.trt = TRTBackbone(plan)
+            self.model.backbone.to("meta")  # release the torch backbone weights
+            torch.cuda.empty_cache()
 
     def preprocess(self, im):
         """BGR HxWx3 uint8 -> model input CHW uint8 tensor (shortest edge = MIN_SIZE_TEST).
@@ -113,20 +131,25 @@ class PersonSegmenter:
             score * mask; valid if area / own_area >= OVERLAP_THRESHOLD), no host syncs.
         Returns list of (prob float32 HxW, hard bool HxW) numpy arrays at out_size.
         """
-        import torch.nn.functional as F
-        from detectron2.structures import ImageList
-
         tm = timer or _NullTimer()
-        m = self.model
         with tm("seg.preprocess"):
             xs = [self.preprocess(im) for im in imgs_bgr]
             sizes = [tuple(x.shape[-2:]) for x in xs]
         pdt = torch.float16 if self.fp16 else torch.float32
+        with torch.cuda.stream(self.stream):
+            return self._person(xs, sizes, out_size, tm, pdt)
+
+    def _person(self, xs, sizes, out_size, tm, pdt):
+        import torch.nn.functional as F
+        from detectron2.structures import ImageList
+
+        m = self.model
         with tm("seg.model", gpu=True):
             ims = [(x.to(m.device, non_blocking=True).float() - m.pixel_mean) / m.pixel_std for x in xs]
             il = ImageList.from_tensors(ims, m.size_divisibility)
             with torch.autocast("cuda", dtype=torch.float16, enabled=self.fp16):
-                out = m.sem_seg_head(m.backbone(il.tensor))
+                feats = self.trt(il.tensor) if self.trt is not None else m.backbone(il.tensor)
+                out = m.sem_seg_head(feats)
         cls_all = out["pred_logits"].float().softmax(-1)  # B, Q, C+1 (tiny, keep FP32)
         masks = out["pred_masks"].to(pdt)                   # B, Q, Hp/4, Wp/4
         num_classes = cls_all.shape[-1] - 1

@@ -51,3 +51,7 @@ _darcs
 /projects/*/datasets
 /models
 /snippet
+# TensorRT engines / ONNX exports / timing caches (built locally per GPU + TRT version)
+*.plan
+*.onnx
+trt_timing.cache
