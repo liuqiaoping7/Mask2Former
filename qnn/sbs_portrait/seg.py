@@ -115,7 +115,7 @@ class PersonSegmenter:
 
 
     @torch.no_grad()
-    def person(self, imgs_bgr, out_size, timer=None):
+    def person(self, imgs_bgr, out_size, timer=None, return_numpy=True):
         """Person-only inference evaluated directly at out_size=(w, h) (e.g. 960x540).
 
         Same model forward as __call__, but replaces the official post-processing
@@ -129,17 +129,24 @@ class PersonSegmenter:
           * a vectorised panoptic rule for the person mask with the same thresholds
             (keep: not void and score > OBJECT_MASK_THRESHOLD; segment = argmax of
             score * mask; valid if area / own_area >= OVERLAP_THRESHOLD), no host syncs.
-        Returns list of (prob float32 HxW, hard bool HxW) numpy arrays at out_size.
+        Returns list of (prob float32 HxW, hard bool HxW) at out_size: numpy arrays, or CUDA
+        tensors ready on the caller's current stream when return_numpy=False.
         """
         tm = timer or _NullTimer()
         with tm("seg.preprocess"):
             xs = [self.preprocess(im) for im in imgs_bgr]
             sizes = [tuple(x.shape[-2:]) for x in xs]
         pdt = torch.float16 if self.fp16 else torch.float32
+        caller = torch.cuda.current_stream()
         with torch.cuda.stream(self.stream):
-            return self._person(xs, sizes, out_size, tm, pdt)
+            res = self._person(xs, sizes, out_size, tm, pdt, return_numpy)
+        if not return_numpy:  # hand the GPU results over to the caller's stream
+            caller.wait_stream(self.stream)
+            for t in (t for r in res for t in r):
+                t.record_stream(caller)
+        return res
 
-    def _person(self, xs, sizes, out_size, tm, pdt):
+    def _person(self, xs, sizes, out_size, tm, pdt, return_numpy):
         import torch.nn.functional as F
         from detectron2.structures import ImageList
 
@@ -184,8 +191,11 @@ class PersonSegmenter:
                 valid = keep & (area > 0) & (own_area > 0) & (seg_area > 0) & \
                     (area >= m.overlap_threshold * own_area) & labels.eq(PERSON_ID)
                 hard = valid[ids] & own_at
-            with tm("seg.d2h", gpu=True):
-                res.append((prob.cpu().numpy(), hard.cpu().numpy()))
+            if return_numpy:
+                with tm("seg.d2h", gpu=True):
+                    res.append((prob.cpu().numpy(), hard.cpu().numpy()))
+            else:
+                res.append((prob, hard))
         return res
 
 

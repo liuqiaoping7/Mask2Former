@@ -108,6 +108,7 @@ def main():
         frame_ms.append((time.perf_counter() - t0) * 1000.0)
         # outputs for correctness checks (not timed)
         if args.dump:
+            r = {k: (v.cpu().numpy() if torch.is_tensor(v) else v) for k, v in r.items()}
             np.savez_compressed(os.path.join(args.out, "dump", f"{t:04d}.npz"),
                                 aL=r["aL"].astype(np.float16), aR=r["aR"].astype(np.float16),
                                 pL=(r["pL"] * 255 + 0.5).astype(np.uint8), pR=(r["pR"] * 255 + 0.5).astype(np.uint8),

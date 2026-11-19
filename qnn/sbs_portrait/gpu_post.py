@@ -1,0 +1,155 @@
+"""GPU (torch) version of the pipeline's alpha post-processing and SBS compositing.
+
+Mirrors the CPU reference (temporal_stereo.py / pipeline.py, OpenCV + numpy) operation by
+operation, at the same work resolution:
+  flow validity  fw-bw consistency + photometric check   (cv2.remap -> grid_sample, border)
+  disparity fill 31x31 elliptic dilation (conv > 0), 9x9 erosion (min-pool), nanquantile
+  soft alpha     smoothstep
+  guided filter  9x9 box filter = reflect pad + avg_pool  (cv2 BORDER_REFLECT_101)
+  temporal EMA   motion-compensated, confidence + motion gate
+  stereo fusion  horizontal warps through the filled disparities
+  compose        bilinear alpha upsample to 1080p (cv2 INTER_LINEAR), blend with the
+                 GPU-resident background, truncate to uint8 like numpy astype
+Everything stays on the GPU; only the per-frame inputs (gray images, flows, disparities,
+the full-res frame) are uploaded through reusable pinned buffers and the composite is
+downloaded once.
+"""
+import cv2
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+
+class Pinned:
+    """Reusable pinned host buffers + async H2D/D2H (avoids pageable copies and re-pinning)."""
+
+    def __init__(self, device):
+        self.dev, self.buf = device, {}
+
+    def _get(self, key, arr):
+        b = self.buf.get(key)
+        if b is None or b.shape != arr.shape or b.dtype != torch.from_numpy(arr[:0]).dtype:
+            b = self.buf[key] = torch.empty(arr.shape, dtype=torch.from_numpy(arr[:0]).dtype, pin_memory=True)
+        return b
+
+    def up(self, key, arr):
+        b = self._get(key, np.ascontiguousarray(arr))
+        b.numpy()[...] = arr
+        return b.to(self.dev, non_blocking=True)
+
+    def down(self, key, t):
+        b = self.buf.get(key)
+        if b is None or tuple(b.shape) != tuple(t.shape) or b.dtype != t.dtype:
+            b = self.buf[key] = torch.empty(tuple(t.shape), dtype=t.dtype, pin_memory=True)
+        b.copy_(t, non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+        return b.numpy()
+
+
+class GPUPost:
+    def __init__(self, ws, bgL, bgR, soft=(0.4, 0.6), gf=(4, 1e-4), lam=0.7, gate=0.5, sigma=10.0,
+                 person_disp=0.0, device="cuda"):
+        self.dev = torch.device(device)
+        self.ws = ws
+        w, h = ws
+        self.soft, self.gf, self.lam, self.gate, self.sigma = soft, gf, lam, gate, sigma
+        gy, gx = torch.meshgrid(torch.arange(h, device=self.dev, dtype=torch.float32),
+                                torch.arange(w, device=self.dev, dtype=torch.float32), indexing="ij")
+        self.gx, self.gy = gx, gy
+        ell = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)).astype(np.float32)
+        self.ellipse = torch.from_numpy(ell)[None, None].to(self.dev)
+        # background as CHW uint8 on the GPU (uploaded once)
+        self.bg = torch.from_numpy(np.ascontiguousarray(np.stack([bgL, bgR]).transpose(0, 3, 1, 2))).to(self.dev)
+        self.prev = {"L": None, "R": None}
+        self.person_disp = torch.tensor(float(person_disp), device=self.dev)
+        self.pin = Pinned(self.dev)
+
+    # ------------------------------------------------------------ warps
+    def _sample(self, img, x, y):
+        """img (C,H,W) float sampled at pixel coords (x,y) (H,W); bilinear, border replicate."""
+        h, w = img.shape[-2:]
+        grid = torch.stack([x * (2.0 / (w - 1)) - 1.0, y * (2.0 / (h - 1)) - 1.0], -1)[None]
+        return F.grid_sample(img[None], grid, mode="bilinear", padding_mode="border", align_corners=True)[0]
+
+    def warp_flow(self, img, flow):
+        """out(x) = img(x + flow(x)); img (C,H,W), flow (H,W,2)."""
+        return self._sample(img, self.gx + flow[..., 0], self.gy + flow[..., 1])
+
+    def warp_h(self, img, dx):
+        return self._sample(img, self.gx + dx, self.gy)
+
+    # ------------------------------------------------------------ stages
+    def flow_validity(self, g_prev, g_cur, fb, ff):
+        """Same rule as temporal_stereo.FlowEstimator.backward_with_validity (fb: cur->prev)."""
+        ff_at = self.warp_flow(ff.permute(2, 0, 1), fb).permute(1, 2, 0)
+        s = fb + ff_at
+        mag = (fb ** 2).sum(-1) + (ff_at ** 2).sum(-1)
+        fwbw_ok = (s ** 2).sum(-1) < 0.01 * mag + 0.5
+        prev_w = self.warp_flow(g_prev[None], fb)[0].round()  # cv2.remap on uint8 rounds
+        photo = (prev_w - g_cur).abs()
+        return fwbw_ok & (photo < 20), photo
+
+    def fill_disparity(self, dL, dR, pL, hL, pR, hR):
+        def band(h, p):
+            m = (h | (p > 0.3)).float()[None, None]
+            return F.conv2d(m, self.ellipse, padding=15)[0, 0] > 0
+
+        bandL, bandR = band(hL, pL), band(hR, pR)
+        core = -F.max_pool2d(-hL.float()[None, None], 9, stride=1, padding=4)[0, 0] > 0.5
+        nan = torch.tensor(float("nan"), device=self.dev)
+        pd = torch.nanquantile(torch.where(core, dL, nan).flatten(), 0.5)
+        self.person_disp = torch.where(torch.isnan(pd), self.person_disp, pd)
+        dd = torch.nanquantile(dL.flatten(), 0.5)
+        dd = torch.where(torch.isnan(dd), torch.zeros_like(dd), dd)
+
+        def fill(d, b):
+            inv = torch.isnan(d)
+            return torch.where(inv & b, self.person_disp, torch.where(inv, dd, d))
+
+        return fill(dL, bandL), fill(dR, bandR)
+
+    def soft_alpha(self, p):
+        lo, hi = self.soft
+        t = ((p - lo) / (hi - lo)).clamp(0.0, 1.0)
+        return t * t * (3 - 2 * t)
+
+    def box(self, x):
+        r = self.gf[0]
+        return F.avg_pool2d(F.pad(x[None, None], (r, r, r, r), mode="reflect"), 2 * r + 1, stride=1)[0, 0]
+
+    def guided(self, guide, p):
+        eps = self.gf[1]
+        mi, mp = self.box(guide), self.box(p)
+        cov = self.box(guide * p) - mi * mp
+        var = self.box(guide * guide) - mi * mi
+        a = cov / (var + eps)
+        b = mp - a * mi
+        return (self.box(a) * guide + self.box(b)).clamp(0.0, 1.0)
+
+    def ema(self, eye, p, fb, valid, photo):
+        prev = self.prev[eye]
+        if prev is None or fb is None:
+            self.prev[eye] = p
+            return p
+        prev_w = self.warp_flow(prev[None], fb)[0]
+        w = self.lam * valid.float() * torch.exp(-photo / self.sigma)
+        if self.gate:
+            w = w * (1.0 - (p - prev_w).abs() / self.gate).clamp(0.0, 1.0)
+        a = w * prev_w + (1.0 - w) * p
+        self.prev[eye] = a
+        return a
+
+    def fusion(self, tL, tR, dLf, dRf):
+        aL = 0.5 * (tL + self.warp_h(tR[None], -dLf)[0])
+        aR = 0.5 * (tR + self.warp_h(tL[None], dRf)[0])
+        return aL, aR
+
+    def compose(self, frame_t, aL, aR):
+        """frame_t: (H, 2W, 3) uint8 on GPU; returns (H, 2W, 3) uint8 on GPU."""
+        H, W2 = frame_t.shape[:2]
+        W = W2 // 2
+        img = frame_t.permute(2, 0, 1).reshape(3, H, 2, W).permute(2, 0, 1, 3).float()  # 2,3,H,W
+        a = F.interpolate(torch.stack([aL, aR])[:, None], size=(H, W), mode="bilinear", align_corners=False)
+        out = img * a + self.bg.float() * (1.0 - a)  # 2,3,H,W
+        out = out.clamp(0, 255).to(torch.uint8)  # truncation, like numpy astype
+        return out.permute(1, 2, 0, 3).reshape(3, H, W2).permute(1, 2, 0)

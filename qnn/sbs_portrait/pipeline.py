@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 import temporal_stereo as ts
+from gpu_post import GPUPost
 from seg import DEFAULT_CONFIG, DEFAULT_WEIGHTS, PersonSegmenter
 
 
@@ -67,7 +68,8 @@ class Timer:
 class SBSPortraitPipeline:
     def __init__(self, first_frame, bg_sbs, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS,
                  work_scale=0.5, soft=(0.4, 0.6), gf=(4, 1e-4), lam=0.7, gate=0.5, bg_margin=4.0,
-                 precision="fp16", backbone="trt", timer=None):
+                 precision="fp16", backbone="trt", post="gpu", timer=None):
+        """post: "gpu" (torch post-processing + compositing, see gpu_post.py) or "cpu" (reference)."""
         self.timer = timer or Timer()
         self.soft, self.gf = soft, gf
         L0, R0 = split_sbs(first_frame)
@@ -103,9 +105,12 @@ class SBSPortraitPipeline:
             bgR = ts.warp_h(bgR, np.full((H, W), -self.bg_shift, np.float32))
         self.bgL, self.bgR = bgL, bgR
         self.prev_g = None
+        self.post = post
+        if post == "gpu":
+            self.gp = GPUPost(ws, bgL, bgR, soft=soft, gf=gf, lam=lam, gate=gate, person_disp=self.person_disp)
 
     # ------------------------------------------------------------------ stages
-    def segment_eyes(self, L, R, record=True):
+    def segment_eyes(self, L, R, record=True, gpu=False):
         """Person prob / hard mask for both eyes at work resolution (numpy).
 
         Person-only inference evaluated directly on the work grid (seg.person), instead of
@@ -114,7 +119,7 @@ class SBSPortraitPipeline:
         tm = self.timer if record else Timer()
         out = []
         for eye in (L, R):
-            prob, hard = self.seg.person([eye], self.ws, timer=tm)[0]
+            prob, hard = self.seg.person([eye], self.ws, timer=tm, return_numpy=not gpu)[0]
             out += [prob, hard]
         return out  # pL, hL, pR, hR
 
@@ -172,6 +177,48 @@ class SBSPortraitPipeline:
 
     # ------------------------------------------------------------------ frame
     def process(self, frame):
+        return self.process_gpu(frame) if self.post == "gpu" else self.process_cpu(frame)
+
+    def process_gpu(self, frame):
+        """CPU: decode-side downscale, SGBM disparity, raw DIS flows. GPU: segmentation, flow
+        validity, disparity fill, soft / guided / EMA / fusion, 1080p compositing."""
+        tm, gp = self.timer, self.gp
+        L, R = split_sbs(frame)
+        with tm("gpu.upload_frame"):
+            frame_t = gp.pin.up("frame", frame)
+        pL, hL, pR, hR = self.segment_eyes(L, R, gpu=True)
+        with tm("geo.downscale"):
+            gL = cv2.cvtColor(down(L, self.ws), cv2.COLOR_BGR2GRAY)
+            gR = cv2.cvtColor(down(R, self.ws), cv2.COLOR_BGR2GRAY)
+        with tm("geo.disparity"):
+            dL, dR = self.stereo(gL, gR)
+        with tm("geo.flow"):
+            flows = None
+            if self.prev_g is not None:
+                pgL, pgR = self.prev_g
+                flows = (self.flow(gL, pgL), self.flow(pgL, gL), self.flow(gR, pgR), self.flow(pgR, gR))
+        self.prev_g = (gL, gR)
+        with tm("gpu.post", gpu=True):
+            up = gp.pin.up
+            gLt, gRt = up("gL", gL).float(), up("gR", gR).float()
+            dLt, dRt = up("dL", dL), up("dR", dR)
+            if flows is not None:
+                fbL, ffL, fbR, ffR = (up(k, f) for k, f in zip(("fbL", "ffL", "fbR", "ffR"), flows))
+                vL, phL = gp.flow_validity(self.prev_gt[0], gLt, fbL, ffL)
+                vR, phR = gp.flow_validity(self.prev_gt[1], gRt, fbR, ffR)
+            else:
+                fbL = fbR = vL = vR = phL = phR = None
+            self.prev_gt = (gLt, gRt)
+            dLf, dRf = gp.fill_disparity(dLt, dRt, pL, hL, pR, hR)
+            sL, sR = gp.soft_alpha(pL), gp.soft_alpha(pR)
+            tL = gp.ema("L", gp.guided(gLt / 255.0, sL), fbL, vL, phL)
+            tR = gp.ema("R", gp.guided(gRt / 255.0, sR), fbR, vR, phR)
+            aL, aR = gp.fusion(tL, tR, dLf, dRf)
+        with tm("gpu.compose+d2h", gpu=True):
+            out = gp.pin.down("out", gp.compose(frame_t, aL, aR))
+        return {"out": out, "aL": aL, "aR": aR, "pL": pL, "pR": pR, "hL": hL, "hR": hR}
+
+    def process_cpu(self, frame):
         L, R = split_sbs(frame)
         pL, hL, pR, hR = self.segment_eyes(L, R)
         gL, gR, dL, dR, fl = self.geometry(L, R)
