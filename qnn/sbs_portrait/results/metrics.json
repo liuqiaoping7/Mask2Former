@@ -1,0 +1,50 @@
+{
+ "frames": 150,
+ "resolution_per_eye": [
+  1920,
+  1080
+ ],
+ "work_resolution": [
+  960,
+  540
+ ],
+ "model": "maskformer2_swin_large_IN21k_384_bs16_100ep.yaml",
+ "batch_eyes": false,
+ "gpu": "NVIDIA GeForce RTX 4060",
+ "params": {
+  "config_file": "/home/qiao/Documents/github/Mask2Former/configs/coco/panoptic-segmentation/swin/maskformer2_swin_large_IN21k_384_bs16_100ep.yaml",
+  "weights": "/home/qiao/Documents/github/Mask2Former/weights/model_final_f07440.pkl",
+  "max_frames": 150,
+  "work_scale": 0.5,
+  "batch_eyes": false
+ },
+ "stereo": {
+  "pair_disp_range_work": [
+   -8,
+   24
+  ],
+  "vertical_offset_px_work": 0.0,
+  "orb_matches": 2238
+ },
+ "latency_ms": {
+  "seg_LR": 1008.9237960000901,
+  "disparity_LR": 26.830511500520515,
+  "flow_LR": 97.65384849924885,
+  "post_raw": 0.30815349964541383
+ },
+ "configs": {
+  "raw": {
+   "tiou": 0.9886665745711969,
+   "tiou_p5": 0.9788444821164798,
+   "tflk_band": 0.034381827183267814,
+   "siou": 0.9845482358824686,
+   "siou_p5": 0.9656454001099247,
+   "sflk_band": 0.03931331114222606,
+   "fid_iou": 1.0,
+   "ghost": 0.00805334335330369,
+   "cwarp": 3.5520210618140715,
+   "post_ms": 0.30815349964541383,
+   "latency_ms": 1009.2319494997355
+  }
+ }
+}
