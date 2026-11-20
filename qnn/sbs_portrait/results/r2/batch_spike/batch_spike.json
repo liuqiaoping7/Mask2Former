@@ -1,0 +1,47 @@
+{
+ "backbone_ms": {
+  "b1x2": 84.88,
+  "b2": 90.07
+ },
+ "pixel_decoder_ms": {
+  "b1x2": 36.07,
+  "b2": 39.07
+ },
+ "decoder_ms": {
+  "b1x2": 6.49,
+  "b2": 8.76
+ },
+ "chain_ms": {
+  "b1x2": 127.26,
+  "b2": 138.67
+ },
+ "per_eye_vs_b1": [
+  {
+   "logits_rel": 0.0774509608745575,
+   "masks_rel": 0.16478390991687775,
+   "mask_sign_agree": 0.9991186261177063
+  },
+  {
+   "logits_rel": 0.08133237808942795,
+   "masks_rel": 0.1433345526456833,
+   "mask_sign_agree": 0.9993404746055603
+  }
+ ],
+ "activation_mb": {
+  "b1": [
+   257.5,
+   185.5,
+   100.9
+  ],
+  "b2": [
+   514.7,
+   383.3,
+   286.6
+  ]
+ },
+ "plan_mb": {
+  "swinl_backbone_fp16_b2_768x1344.plan": 401,
+  "pixel_decoder_fp16_b2_768x1344.plan": 25,
+  "decoder_fp16_b2_768x1344.plan": 40
+ }
+}

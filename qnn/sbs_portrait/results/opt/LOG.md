@@ -30,6 +30,7 @@
 | 17 | 引擎 | transformer decoder → TensorRT FP16（位置编码常量化，注意力 mask 改有限值 -1e4 加性 mask，NHWC/FP16 输入零拷贝衔接 pixel decoder engine），不再需要 torch.compile | 152.0（−11.0） | 1684 | 2264 | 3.5e-4 / 0.9981 / 0.9872 | 0.0122 | 保留，冻结 decoder 引擎 | 每眼 decoder 9.2→4.2 ms；显存 −286 MB、RSS −333 MB（不加载 Inductor 编译栈） |
 | ✗ | 引擎 | backbone + pixel decoder + transformer decoder 合并为一个 TRT engine（`prof/merge_spike.py`） | 每眼 63.65 vs 三段 63.62 ms | – | 构建 9.8 GB | 输出与三段完全相同 | – | 回退 | 段间边界无可融合算子，FP32 特征读写与 3 次 enqueue 仅数十 µs；单体 plan 467 MB，改任一段都需重导 Swin-L |
 | ✗ | 微调 | backbone engine 用 builder_optimization_level=5（默认 3） | 42.63 vs 42.60 ms/眼 | – | 构建 11 GB / 506 s | – | – | 回退 | 无收益，构建慢 6 倍 |
+| ✗ | 并行 | 第二轮后重测双眼 batch=2（三个 TRT engine 均为 batch 2，`prof/batch_spike.py`） | 链路 127.3→138.7 ms（+11.4） | 激活 544→1185 MB | – | 每眼 masks 与 batch 1 差 14%～16%，正负号一致率 99.91% | – | 回退 | 各阶段都变慢：backbone +5.2、pixel decoder +3.0、decoder +2.3 ms；backbone 已计算受限，单眼工作集更易留在 24 MB L2（推断，未用 ncu 核实），且 batch 2 选到不同 FP16 tactic |
 
 ### 第 12 项过程记录（上限试验 `prof/pd_spike.py` → `results/r2/pd_spike*`）
 - MSDA 插件单测：与上游 CUDA 核逐位一致（max diff 0）。
@@ -64,4 +65,4 @@
 | 跨帧流水线（帧 t 后处理时开始 t+1 分割） | 吞吐 ≤ 5%（GPU 已 95.6% 忙） | 中 | 收益低 |
 | seg.person Triton kernel 进一步优化（2.8 ms/眼） | ≤ 3 ms/帧 | 中 | 收益 < 2%，只是成本高 |
 | NVOF / NVDEC / NVENC | 释放 CPU（不降延迟） | 中 | 光流算法改变，需重新验收 3D 指标 |
-| 已回退（不再尝试，除非有新证据） | 双眼 batch=2、pinned 帧暂存、整模型单 engine、opt level 5 | | |
+| 已回退（不再尝试，除非有新证据） | 双眼 batch=2（第一轮与第二轮后各测一次）、pinned 帧暂存、整模型单 engine、opt level 5 | | |

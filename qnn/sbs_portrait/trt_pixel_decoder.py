@@ -52,7 +52,8 @@ class _ConstPE(torch.nn.Module):
                 self.register_buffer(f"pe_{h}x{w}", pe(torch.zeros(1, 1, h, w, device=device)))
 
     def forward(self, x, mask=None):
-        return getattr(self, f"pe_{x.shape[-2]}x{x.shape[-1]}").to(x.dtype)
+        pe = getattr(self, f"pe_{x.shape[-2]}x{x.shape[-1]}").to(x.dtype)
+        return pe.expand(x.shape[0], -1, -1, -1)  # same embedding for every image of the batch
 
 
 class _Wrap(torch.nn.Module):
