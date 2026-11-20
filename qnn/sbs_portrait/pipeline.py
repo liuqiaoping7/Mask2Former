@@ -113,6 +113,7 @@ class SBSPortraitPipeline:
         self.pool = ThreadPoolExecutor(1, thread_name_prefix="geometry") if overlap else None
         if post == "gpu":
             self.gp = GPUPost(ws, bgL, bgR, soft=soft, gf=gf, lam=lam, gate=gate, person_disp=self.person_disp)
+            self.up_stream = torch.cuda.Stream()  # geometry results are uploaded from the worker thread
 
     # ------------------------------------------------------------------ stages
     def segment_eyes(self, L, R, record=True, gpu=False, pre=None):
@@ -190,7 +191,7 @@ class SBSPortraitPipeline:
         validity, disparity fill, soft / guided / EMA / fusion, 1080p compositing."""
         tm, gp = self.timer, self.gp
         L, R = split_sbs(frame)
-        geo = self.pool.submit(self.cpu_geometry, L, R) if self.pool else None
+        geo = self.pool.submit(self.cpu_geometry, L, R, True) if self.pool else None
         with tm("gpu.upload_frame"):
             frame_t = gp.pin.up("frame", frame)
         # model-input resize on the GPU from the uploaded frame (OpenCV INTER_AREA weights);
@@ -199,13 +200,16 @@ class SBSPortraitPipeline:
             pre = [self.seg.preprocess_gpu(frame_t[:, :self.W]), self.seg.preprocess_gpu(frame_t[:, self.W:])]
         pL, hL, pR, hR = self.segment_eyes(L, R, gpu=True, pre=pre)
         with tm("geo.wait"):  # time the GPU path waits for the CPU geometry (0 when fully hidden)
-            gL, gR, dL, dR, flows = geo.result() if geo else self.cpu_geometry(L, R)
+            gL, gR, dL, dR, flows, (dev, done) = geo.result() if geo else self.cpu_geometry(L, R, True)
         with tm("gpu.post", gpu=True):
-            up = gp.pin.up
-            gLt, gRt = up("gL", gL).float(), up("gR", gR).float()
-            dLt, dRt = up("dL", dL), up("dR", dR)
+            cur = torch.cuda.current_stream()
+            cur.wait_event(done)  # uploads ran on up_stream while the GPU was segmenting
+            for x in dev:
+                if x is not None:
+                    x.record_stream(cur)
+            gLt, gRt, dLt, dRt, fbL, ffL, fbR, ffR = dev
+            gLt, gRt = gLt.float(), gRt.float()
             if flows is not None:
-                fbL, ffL, fbR, ffR = (up(k, f) for k, f in zip(("fbL", "ffL", "fbR", "ffR"), flows))
                 vL, phL = gp.flow_validity(self.prev_gt[0], gLt, fbL, ffL)
                 vR, phR = gp.flow_validity(self.prev_gt[1], gRt, fbR, ffR)
             else:
@@ -220,8 +224,10 @@ class SBSPortraitPipeline:
             out = gp.pin.down("out", gp.compose(frame_t, aL, aR))
         return {"out": out, "aL": aL, "aR": aR, "pL": pL, "pR": pR, "hL": hL, "hR": hR}
 
-    def cpu_geometry(self, L, R):
-        """Gray work-res images, SGBM disparities and raw DIS flows (fw + bw) for both eyes."""
+    def cpu_geometry(self, L, R, upload=False):
+        """Gray work-res images, SGBM disparities and raw DIS flows (fw + bw) for both eyes.
+        upload: also copy them to the GPU on up_stream (pinned, async) right away, so the copies
+        overlap the segmentation instead of following it; returns (tensors, done event) extra."""
         tm = self.timer
         with tm("geo.downscale"):
             gL = cv2.cvtColor(down(L, self.ws), cv2.COLOR_BGR2GRAY)
@@ -234,7 +240,15 @@ class SBSPortraitPipeline:
                 pgL, pgR = self.prev_g
                 flows = (self.flow(gL, pgL), self.flow(pgL, gL), self.flow(gR, pgR), self.flow(pgR, gR))
         self.prev_g = (gL, gR)
-        return gL, gR, dL, dR, flows
+        if not upload:
+            return gL, gR, dL, dR, flows
+        with tm("geo.upload"), torch.cuda.stream(self.up_stream):
+            up = self.gp.pin.up
+            fl = [up(k, f) for k, f in zip(("fbL", "ffL", "fbR", "ffR"), flows)] if flows is not None else [None] * 4
+            dev = [up("gL", gL), up("gR", gR), up("dL", dL), up("dR", dR), *fl]
+            done = torch.cuda.Event()
+            done.record(self.up_stream)
+        return gL, gR, dL, dR, flows, (dev, done)
 
     def process_cpu(self, frame):
         L, R = split_sbs(frame)
