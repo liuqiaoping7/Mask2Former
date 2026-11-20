@@ -3,9 +3,12 @@
 Mirrors the CPU reference (temporal_stereo.py / pipeline.py, OpenCV + numpy) operation by
 operation, at the same work resolution:
   flow validity  fw-bw consistency + photometric check   (cv2.remap -> grid_sample, border)
-  disparity fill 31x31 elliptic dilation (conv > 0), 9x9 erosion (min-pool), nanquantile
+  disparity fill 31x31 elliptic dilation (exact: per-row distance to the nearest foreground
+                 pixel vs the ellipse's half width at each row offset), 9x9 erosion
+                 (min-pool), nanquantile
   soft alpha     smoothstep
-  guided filter  9x9 box filter = reflect pad + avg_pool  (cv2 BORDER_REFLECT_101)
+  guided filter  9x9 box filter = reflect pad + separable avg_pool (cv2 BORDER_REFLECT_101),
+                 the four first-pass and two second-pass box filters batched
   temporal EMA   motion-compensated, confidence + motion gate
   stereo fusion  horizontal warps through the filled disparities
   compose        bilinear alpha upsample to 1080p (cv2 INTER_LINEAR), blend with the
@@ -56,8 +59,14 @@ class GPUPost:
         gy, gx = torch.meshgrid(torch.arange(h, device=self.dev, dtype=torch.float32),
                                 torch.arange(w, device=self.dev, dtype=torch.float32), indexing="ij")
         self.gx, self.gy = gx, gy
-        ell = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)).astype(np.float32)
-        self.ellipse = torch.from_numpy(ell)[None, None].to(self.dev)
+        ell = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+        hw = []  # half width of each row (rows are runs centred on the middle column)
+        for row in ell:
+            on = np.flatnonzero(row)
+            h = len(on) // 2
+            assert len(on) == 0 or list(on) == list(range(15 - h, 16 + h)), "ellipse rows must be centred runs"
+            hw.append(h if len(on) else -1)
+        self.ell_hw = torch.tensor(hw, dtype=torch.float32, device=self.dev)
         # background as CHW uint8 on the GPU (uploaded once)
         self.bg = torch.from_numpy(np.ascontiguousarray(np.stack([bgL, bgR]).transpose(0, 3, 1, 2))).to(self.dev)
         self.prev = {"L": None, "R": None}
@@ -91,8 +100,7 @@ class GPUPost:
 
     def fill_disparity(self, dL, dR, pL, hL, pR, hR):
         def band(h, p):
-            m = (h | (p > 0.3)).float()[None, None]
-            return F.conv2d(m, self.ellipse, padding=15)[0, 0] > 0
+            return self.dilate_ellipse(h | (p > 0.3))
 
         bandL, bandR = band(hL, pL), band(hR, pR)
         core = -F.max_pool2d(-hL.float()[None, None], 9, stride=1, padding=4)[0, 0] > 0.5
@@ -108,23 +116,42 @@ class GPUPost:
 
         return fill(dL, bandL), fill(dR, bandR)
 
+    def dilate_ellipse(self, m):
+        """Binary dilation of m (H, W bool) by the 31x31 OpenCV ellipse, = conv2d(m, ellipse) > 0
+        exactly, without the 961-tap convolution: dh = distance from each pixel to the nearest
+        foreground pixel of its row (two cumulative scans); a pixel is in the dilation iff for
+        some row offset dy, dh(y + dy, x) <= half_width(dy)."""
+        H, W = m.shape
+        idx = torch.arange(W, device=m.device).expand(H, W)
+        left = torch.where(m, idx, -4 * W).cummax(1).values                    # last fg <= x
+        right = torch.where(m, idx, 5 * W).flip(1).cummin(1).values.flip(1)    # first fg >= x
+        dh = torch.minimum(idx - left, right - idx).float()
+        r = (len(self.ell_hw) - 1) // 2
+        win = F.pad(dh[None, None], (0, 0, r, r), value=float("inf"))[0, 0].unfold(0, 2 * r + 1, 1)  # H, W, 31
+        return (win <= self.ell_hw).any(-1)
+
     def soft_alpha(self, p):
         lo, hi = self.soft
         t = ((p - lo) / (hi - lo)).clamp(0.0, 1.0)
         return t * t * (3 - 2 * t)
 
     def box(self, x):
+        """9x9 mean of each (H, W) plane of x (N, H, W): reflect-101 pad, then a vertical and a
+        horizontal 1-D average (separable: 2 x 9 instead of 81 taps)."""
         r = self.gf[0]
-        return F.avg_pool2d(F.pad(x[None, None], (r, r, r, r), mode="reflect"), 2 * r + 1, stride=1)[0, 0]
+        y = F.pad(x[:, None], (r, r, r, r), mode="reflect")
+        y = F.avg_pool2d(y, (2 * r + 1, 1), stride=1)
+        return F.avg_pool2d(y, (1, 2 * r + 1), stride=1)[:, 0]
 
     def guided(self, guide, p):
         eps = self.gf[1]
-        mi, mp = self.box(guide), self.box(p)
-        cov = self.box(guide * p) - mi * mp
-        var = self.box(guide * guide) - mi * mi
+        mi, mp, mgp, mgg = self.box(torch.stack([guide, p, guide * p, guide * guide]))
+        cov = mgp - mi * mp
+        var = mgg - mi * mi
         a = cov / (var + eps)
         b = mp - a * mi
-        return (self.box(a) * guide + self.box(b)).clamp(0.0, 1.0)
+        ma, mb = self.box(torch.stack([a, b]))
+        return (ma * guide + mb).clamp(0.0, 1.0)
 
     def ema(self, eye, p, fb, valid, photo):
         prev = self.prev[eye]
