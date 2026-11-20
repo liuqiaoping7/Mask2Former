@@ -1,0 +1,8 @@
+{
+ "merged_ms": 63.70185661315918,
+ "chain_ms": 63.69483184814453,
+ "logits_rel_vs_chain": 0.0,
+ "masks_rel_vs_chain": 0.0,
+ "mask_sign_agree_vs_chain": 0.9999999403953552,
+ "plan_mb": 467.0849494934082
+}

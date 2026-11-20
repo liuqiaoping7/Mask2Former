@@ -28,6 +28,8 @@
 | 16 | 空间 / 冷启动 | Inductor 缓存真正写到 weights/inductor_cache（cache_dir() 首次调用会把 /tmp 默认值写回环境变量，setdefault 失效） | 稳态不变 | – | – | 不变 | – | 保留 | 首次编译 40 s；有缓存 10 s；删 /tmp 缓存（模拟重启）后 7.5 s，不再重编译（原 90 s） |
 | ✗ | 系统 | 解码线程把帧直接写进双缓冲 pinned 暂存区，主线程只发 H2D | 162.6（−0.4） | 2006 | 2605 | 不变 | 0.0122 | 回退 | 收益 < 波动（~0.7 ms）：同步模式 upload_frame 2.7→0.1 ms，但 GPU 已饱和（95.5%），该 CPU 拷贝与其他 GPU 工作重叠，不在关键路径 |
 | 17 | 引擎 | transformer decoder → TensorRT FP16（位置编码常量化，注意力 mask 改有限值 -1e4 加性 mask，NHWC/FP16 输入零拷贝衔接 pixel decoder engine），不再需要 torch.compile | 152.0（−11.0） | 1684 | 2264 | 3.5e-4 / 0.9981 / 0.9872 | 0.0122 | 保留，冻结 decoder 引擎 | 每眼 decoder 9.2→4.2 ms；显存 −286 MB、RSS −333 MB（不加载 Inductor 编译栈） |
+| ✗ | 引擎 | backbone + pixel decoder + transformer decoder 合并为一个 TRT engine（`prof/merge_spike.py`） | 每眼 63.65 vs 三段 63.62 ms | – | 构建 9.8 GB | 输出与三段完全相同 | – | 回退 | 段间边界无可融合算子，FP32 特征读写与 3 次 enqueue 仅数十 µs；单体 plan 467 MB，改任一段都需重导 Swin-L |
+| ✗ | 微调 | backbone engine 用 builder_optimization_level=5（默认 3） | 42.63 vs 42.60 ms/眼 | – | 构建 11 GB / 506 s | – | – | 回退 | 无收益，构建慢 6 倍 |
 
 ### 第 12 项过程记录（上限试验 `prof/pd_spike.py` → `results/r2/pd_spike*`）
 - MSDA 插件单测：与上游 CUDA 核逐位一致（max diff 0）。
@@ -47,3 +49,19 @@
 
 ### 其他
 - 静默回退：Inductor 缓存实际写在 /tmp/torchinductor_qiao，而非 weights/inductor_cache（第 16 项已修）。
+
+### 第二轮结束状态（第 17 项后，`results/r2/nsys_final.txt`）
+- 端到端 152.0 ms（6.58 fps），每帧 wall（nsys）149.3 ms，GPU 忙碌 95.6%，同步 2 次/帧，kernel 启动 466 次/帧。
+- 每眼：backbone 42.4 / pixel decoder 18.1 / decoder 4.2 ms；backbone 约占端到端 56%，已接近算力上限（第一轮估算 ≥55% roofline；本轮 opt level 5 无收益）。
+- 停止依据：其余单项均 < 5%（seg.person 5.8、gpu.post 4.4、compose 4.3 ms）；GPU 已饱和，CPU 侧拷贝不在关键路径。
+
+### 下一轮候选池
+| 候选 | 预期收益 | 成本 | 阻塞原因 |
+| ---- | -------- | ---- | -------- |
+| backbone FP8 / INT8（Ada 支持，TensorRT PTQ 校准） | backbone 85 ms/帧的 30%～50% | 中 | 突破精度约束，需用户决定并以端到端质量验收 |
+| 输入短边 800→640 | 分割 ~35% | 低 | 改变分割质量本身，需用户决定 |
+| pixel decoder FP16 精度提升（逐层定位误差来源） | 精度（非速度） | 中 | 当前端到端已在容差内，仅在要求更高精度时做 |
+| 跨帧流水线（帧 t 后处理时开始 t+1 分割） | 吞吐 ≤ 5%（GPU 已 95.6% 忙） | 中 | 收益低 |
+| seg.person Triton kernel 进一步优化（2.8 ms/眼） | ≤ 3 ms/帧 | 中 | 收益 < 2%，只是成本高 |
+| NVOF / NVDEC / NVENC | 释放 CPU（不降延迟） | 中 | 光流算法改变，需重新验收 3D 指标 |
+| 已回退（不再尝试，除非有新证据） | 双眼 batch=2、pinned 帧暂存、整模型单 engine、opt level 5 | | |
