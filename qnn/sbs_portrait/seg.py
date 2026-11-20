@@ -27,7 +27,7 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
                  backbone="torch", eye_hw=(1080, 1920), trt_plan=None, fused=True, fast_decoder=False,
-                 compile_decoders=False):
+                 compile_decoders=False, pixel_decoder="torch"):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
@@ -40,7 +40,10 @@ class PersonSegmenter:
         (see _decoder_inference_forward); outputs only pred_logits / pred_masks.
         compile_decoders: torch.compile (Inductor, max-autotune without CUDA graphs, static
         shapes) the pixel decoder and the transformer decoder; first use compiles for ~2 min,
-        the Inductor cache under weights/inductor_cache makes later starts fast."""
+        the Inductor cache under weights/inductor_cache makes later starts fast.
+        pixel_decoder: "torch" or "trt" (needs backbone="trt") -- the whole MSDeformAttn pixel
+        decoder as one static-shape TensorRT FP16 engine with the built-in MSDA plugin
+        (trt_pixel_decoder.py); only the transformer decoder is then compiled."""
         cfg = get_cfg()
         add_deeplab_config(cfg)
         add_maskformer2_config(cfg)
@@ -74,9 +77,10 @@ class PersonSegmenter:
             os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(REPO, "weights", "inductor_cache"))
             head = self.model.sem_seg_head
             opts = dict(mode="max-autotune-no-cudagraphs", dynamic=False)
-            head.pixel_decoder.forward_features = torch.compile(head.pixel_decoder.forward_features, **opts)
+            if pixel_decoder != "trt":
+                head.pixel_decoder.forward_features = torch.compile(head.pixel_decoder.forward_features, **opts)
             head.predictor.forward = torch.compile(head.predictor.forward, **opts)
-        self.trt = None
+        self.trt = self.trt_pd = None
         if backbone == "trt":
             from trt_backbone import TRTBackbone, build_engine
             nh, nw = T.ResizeShortestEdge.get_output_shape(eye_hw[0], eye_hw[1], cfg.INPUT.MIN_SIZE_TEST,
@@ -88,6 +92,15 @@ class PersonSegmenter:
                 build_engine(self.model.backbone, plan, shape)
             self.trt = TRTBackbone(plan)
             self.model.backbone.to("meta")  # release the torch backbone weights
+            if pixel_decoder == "trt":
+                from trt_pixel_decoder import TRTPixelDecoder
+                from trt_pixel_decoder import build_engine as build_pd
+                pd_plan = os.path.join(REPO, "weights", f"pixel_decoder_fp16_{shape[2]}x{shape[3]}.plan")
+                if not os.path.exists(pd_plan):
+                    build_pd(self.model.sem_seg_head.pixel_decoder,
+                             {k: tuple(v.shape) for k, v in self.trt.out.items()}, pd_plan)
+                self.trt_pd = TRTPixelDecoder(pd_plan)
+                self.model.sem_seg_head.pixel_decoder.to("meta")
             torch.cuda.empty_cache()
 
     def preprocess(self, im):
@@ -194,7 +207,11 @@ class PersonSegmenter:
             il = ImageList.from_tensors(ims, m.size_divisibility)
             with torch.autocast("cuda", dtype=torch.float16, enabled=self.fp16):
                 feats = self.trt(il.tensor) if self.trt is not None else m.backbone(il.tensor)
-                out = m.sem_seg_head(feats)
+                if self.trt_pd is not None:
+                    mf, ms = self.trt_pd(feats)
+                    out = m.sem_seg_head.predictor(ms, mf, None)
+                else:
+                    out = m.sem_seg_head(feats)
         cls_all = out["pred_logits"].float().softmax(-1)  # B, Q, C+1 (tiny, keep FP32)
         masks = out["pred_masks"].to(pdt)                   # B, Q, Hp/4, Wp/4
         num_classes = cls_all.shape[-1] - 1

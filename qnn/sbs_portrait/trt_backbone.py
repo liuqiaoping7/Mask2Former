@@ -73,6 +73,7 @@ class TRTBackbone:
                                    dtype=dt[self.engine.get_tensor_dtype(n)], device="cuda") for n in LEVELS}
         for n, t in self.out.items():
             self.ctx.set_tensor_address(n, t.data_ptr())
+        self.last = None
 
     def __call__(self, x):
         if tuple(x.shape) != self.shape:
@@ -80,6 +81,9 @@ class TRTBackbone:
         x = x.float().contiguous()
         self.ctx.set_tensor_address(self.input, x.data_ptr())
         stream = torch.cuda.current_stream()
+        if self.last is not None and self.last != stream:  # shared context / output buffers
+            stream.wait_stream(self.last)
+        self.last = stream
         if not self.ctx.execute_async_v3(stream.cuda_stream):
             raise RuntimeError("TensorRT execution failed")
         x.record_stream(stream)
