@@ -1,5 +1,6 @@
 """Mask2Former person segmenter for SBS eyes (official panoptic + semantic inference)."""
 import contextlib
+import math
 import os
 import sys
 
@@ -67,6 +68,7 @@ class PersonSegmenter:
             torch.backends.cudnn.allow_tf32 = True
             _enable_pixel_decoder_fp16(self.model)
         self.stream = torch.cuda.Stream()
+        self._area = {}
         self.fused = fused
         if fast_decoder:
             import types
@@ -116,6 +118,28 @@ class PersonSegmenter:
         if self.fmt == "RGB":
             x = x[:, :, ::-1]
         return torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)))
+
+    def preprocess_gpu(self, eye):
+        """GPU version of preprocess() for an eye already on the GPU (HxWx3 uint8 BGR view of
+        the uploaded SBS frame): OpenCV INTER_AREA resize with OpenCV's own area weights
+        (computeResizeAreaTab, horizontal then vertical like cv::resizeArea, cvRound), BGR->RGB
+        and the model normalisation, fused in one Triton kernel (area_triton.py). Returns the
+        normalised float CHW input; runs on the current stream."""
+        from area_triton import area_resize_normalize
+
+        h, w = eye.shape[:2]
+        nh, nw = T.ResizeShortestEdge.get_output_shape(h, w, self.cfg.INPUT.MIN_SIZE_TEST, self.cfg.INPUT.MAX_SIZE_TEST)
+        key = (h, w, nh, nw)
+        if key not in self._area:
+            tx, ty = _area_taps(w, nw), _area_taps(h, nh)
+            k = max(len(t[0]) for t in tx + ty)
+            pad = lambda taps: (torch.tensor([i + [i[-1]] * (k - len(i)) for i, _ in taps], dtype=torch.int32, device=eye.device),  # noqa: E731
+                                torch.tensor([a + [0.0] * (k - len(a)) for _, a in taps], dtype=torch.float32, device=eye.device))
+            m = self.model
+            self._area[key] = (pad(tx), pad(ty), m.pixel_mean.flatten().float().contiguous(),
+                               m.pixel_std.flatten().float().contiguous())
+        tx, ty, mean, std = self._area[key]
+        return area_resize_normalize(eye, tx, ty, mean, std, rgb=self.fmt == "RGB")
 
     def _person_fused(self, masks, cls, hw, padded_hw, out_hw):
         from person_triton import fused_person
@@ -179,7 +203,9 @@ class PersonSegmenter:
             score * mask; valid if area / own_area >= OVERLAP_THRESHOLD), no host syncs.
         Returns list of (prob float32 HxW, hard bool HxW) at out_size: numpy arrays, or CUDA
         tensors ready on the caller's current stream when return_numpy=False.
-        pre: already preprocessed inputs (list of self.preprocess(img)); imgs_bgr is then unused.
+        pre: already preprocessed inputs (list of self.preprocess(img) uint8 CPU tensors, or of
+        self.preprocess_gpu(eye) normalised CUDA tensors made on the caller's stream); imgs_bgr
+        is then unused.
         """
         tm = timer or _NullTimer()
         if pre is None:
@@ -189,6 +215,10 @@ class PersonSegmenter:
         sizes = [tuple(x.shape[-2:]) for x in xs]
         pdt = torch.float16 if self.fp16 else torch.float32
         caller = torch.cuda.current_stream()
+        self.stream.wait_stream(caller)  # GPU-preprocessed inputs come from the caller's stream
+        for x in xs:
+            if x.is_cuda:
+                x.record_stream(self.stream)
         with torch.cuda.stream(self.stream):
             res = self._person(xs, sizes, out_size, tm, pdt, return_numpy)
         if not return_numpy:  # hand the GPU results over to the caller's stream
@@ -203,7 +233,8 @@ class PersonSegmenter:
 
         m = self.model
         with tm("seg.model", gpu=True):
-            ims = [(x.to(m.device, non_blocking=True).float() - m.pixel_mean) / m.pixel_std for x in xs]
+            ims = [x if x.is_cuda else (x.to(m.device, non_blocking=True).float() - m.pixel_mean) / m.pixel_std
+                   for x in xs]
             il = ImageList.from_tensors(ims, m.size_divisibility)
             with torch.autocast("cuda", dtype=torch.float16, enabled=self.fp16):
                 feats = self.trt(il.tensor) if self.trt is not None else m.backbone(il.tensor)
@@ -261,6 +292,28 @@ class PersonSegmenter:
             else:
                 res.append((prob, hard))
         return res
+
+
+def _area_taps(src, dst):
+    """OpenCV INTER_AREA weights for a downscale src -> dst (cv::computeResizeAreaTab): per output
+    index, the overlapped source cells and their overlap / cell width (stored as float like OpenCV)."""
+    scale = src / dst
+    taps = []
+    for d in range(dst):
+        f1 = d * scale
+        f2 = f1 + scale
+        cw = min(scale, src - f1)
+        s1, s2 = math.ceil(f1), math.floor(f2)
+        s2 = min(s2, src - 1)
+        s1 = min(s1, s2)
+        t = []
+        if s1 - f1 > 1e-3:
+            t.append((s1 - 1, (s1 - f1) / cw))
+        t += [(s, 1.0 / cw) for s in range(s1, s2)]
+        if f2 - s2 > 1e-3:
+            t.append((s2, min(min(f2 - s2, 1.0), cw) / cw))
+        taps.append(([i for i, _ in t], [float(np.float32(a)) for _, a in t]))
+    return taps
 
 
 def _pixel_decoder_fp16_forward_features(self, features):

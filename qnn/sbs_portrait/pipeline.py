@@ -190,13 +190,13 @@ class SBSPortraitPipeline:
         validity, disparity fill, soft / guided / EMA / fusion, 1080p compositing."""
         tm, gp = self.timer, self.gp
         L, R = split_sbs(frame)
-        # model-input resize first: it is on the critical path and would otherwise compete with
-        # the geometry thread for the OpenCV thread pool
-        with tm("seg.preprocess"):
-            pre = [self.seg.preprocess(L), self.seg.preprocess(R)]
         geo = self.pool.submit(self.cpu_geometry, L, R) if self.pool else None
         with tm("gpu.upload_frame"):
             frame_t = gp.pin.up("frame", frame)
+        # model-input resize on the GPU from the uploaded frame (OpenCV INTER_AREA weights);
+        # takes 7 ms of CPU work off the critical path and out of the OpenCV thread pool
+        with tm("seg.preprocess"):
+            pre = [self.seg.preprocess_gpu(frame_t[:, :self.W]), self.seg.preprocess_gpu(frame_t[:, self.W:])]
         pL, hL, pR, hR = self.segment_eyes(L, R, gpu=True, pre=pre)
         with tm("geo.wait"):  # time the GPU path waits for the CPU geometry (0 when fully hidden)
             gL, gR, dL, dR, flows = geo.result() if geo else self.cpu_geometry(L, R)

@@ -22,6 +22,7 @@
 | # | 层次 | 改动 | 端到端 ms | 显存峰值 MB | RSS MB | alpha MAE / IoU 均值 / 最差 | ghost | 结论 | 原因 |
 | - | ---- | ---- | --------- | ----------- | ------ | --------------------------- | ----- | ---- | ---- |
 | 12 | 引擎 | pixel decoder → TensorRT FP16（内置 MultiscaleDeformableAttnPlugin_TRT），位置编码常量化，多尺度输出 NHWC | 177.3（−36.4） | 1950 | 2643 | 3.5e-4 / 0.9981 / 0.9872 | 0.0122 | 保留，冻结 pixel decoder 引擎 | 每眼 pixel decoder 34.9→18.1 ms |
+| 13 | 系统 / kernel | 模型输入预处理移到 GPU：OpenCV INTER_AREA 权重表 + cvRound + RGB + 归一化融合为一个 Triton kernel，从已上传的整帧直接读 | 168.5（−8.8） | 1950 | 2640 | 3.5e-4 / 0.9981 / 0.9871 | 0.0122 | 保留 | CPU 关键路径 7.4→0.5 ms；GPU 0.09 ms/眼；与 cv2 逐像素 99.98% 相同、最大差 1 |
 
 ### 第 12 项过程记录（上限试验 `prof/pd_spike.py` → `results/r2/pd_spike*`）
 - MSDA 插件单测：与上游 CUDA 核逐位一致（max diff 0）。
@@ -29,4 +30,10 @@
 - FP16 engine 输出误差 0.6%～1.5%（torch FP16 路径 0.05%）。尝试：采样相关层 + 插件固定 FP32（26 ms，误差不变）、非 GEMM 层全 FP32（24.7 ms，0.3%～0.9%）、MatMul FP32 输出（误差不变）→ 误差不来自插件 / 采样坐标 / 累加；端到端指标在容差内，选纯 FP16（18.1 ms）。
 - 接入后只省 16 ms：transformer decoder 8.75→23 ms，原因是 TRT 输出 NCHW 连续，而 torch 路径的多尺度特征是 channels-last 步长；engine 改为 NHWC 输出后恢复 8.8 ms。
 - 测试脚本在默认 stream 与 seg.stream 交替调用同一 TRT context 时出现 illegal memory access（CUDA_LAUNCH_BLOCKING 下消失）：TRT 封装加跨 stream 顺序保护。
+### 第 13 项过程记录（`prof/check_preprocess_gpu.py`）
+- 预取线程里做下一帧预处理只缩短循环周期，不降低单帧延迟，未采用；改为 GPU 预处理（原帧本来就上传给合成用）。
+- gather + sum 实现 2.1 ms/眼（K 倍中间张量），GPU 是瓶颈时净收益只有 ~3 ms；融合 Triton kernel 0.09 ms/眼。
+- seg.model 同时 −5 ms：不再从 pageable 内存上传预处理后的 uint8 输入。
+
+### 其他
 - 静默回退：Inductor 缓存实际写在 /tmp/torchinductor_qiao，而非 weights/inductor_cache（待修，见候选 F）。
