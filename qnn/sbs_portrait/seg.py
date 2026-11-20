@@ -76,7 +76,13 @@ class PersonSegmenter:
             pred = self.model.sem_seg_head.predictor
             pred.forward = types.MethodType(_decoder_inference_forward, pred)
         if compile_decoders:
-            os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(REPO, "weights", "inductor_cache"))
+            # setdefault is not enough: inductor's cache_dir() writes its /tmp default into the
+            # environment on first use (already triggered at import time), so the cache silently
+            # landed in /tmp/torchinductor_<user> and was lost on reboot. Override the default,
+            # keep an explicitly chosen directory.
+            from torch._inductor.runtime.cache_dir_utils import default_cache_dir
+            if os.environ.get("TORCHINDUCTOR_CACHE_DIR") in (None, default_cache_dir()):
+                os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(REPO, "weights", "inductor_cache")
             head = self.model.sem_seg_head
             opts = dict(mode="max-autotune-no-cudagraphs", dynamic=False)
             if pixel_decoder != "trt":

@@ -25,6 +25,7 @@
 | 13 | 系统 / kernel | 模型输入预处理移到 GPU：OpenCV INTER_AREA 权重表 + cvRound + RGB + 归一化融合为一个 Triton kernel，从已上传的整帧直接读 | 168.5（−8.8） | 1950 | 2640 | 3.5e-4 / 0.9981 / 0.9871 | 0.0122 | 保留 | CPU 关键路径 7.4→0.5 ms；GPU 0.09 ms/眼；与 cv2 逐像素 99.98% 相同、最大差 1 |
 | 14 | 数据流 | 几何结果（灰度、视差、4 个光流，20.8 MB/帧）在几何线程算完即用独立 copy stream 上传，与 GPU 分割重叠 | 166.4（−2.1） | 1972 | 2636 | 3.5e-4 / 0.9981 / 0.9872 | 0.0122 | 保留 | gpu.post 13.0→7.8 ms；原同步路径上传 4.6 ms，部分本已与计算重叠，端到端 −2.1 ms（p95−中位 0.3 ms，>波动） |
 | 15 | 算法 | 后处理：31×31 椭圆膨胀改为行内最近前景距离 + 按行半宽判定（与卷积逐像素一致），9×9 box 改可分离并批量化 | 163.0（−3.4） | 1970 | 2597 | 3.5e-4 / 0.9981 / 0.9872 | 0.0122 | 保留 | gpu.post 7.8→4.5 ms；膨胀 2.15→0.40 ms/次（原为 961 抽头 TF32 卷积，占后处理 52%） |
+| 16 | 空间 / 冷启动 | Inductor 缓存真正写到 weights/inductor_cache（cache_dir() 首次调用会把 /tmp 默认值写回环境变量，setdefault 失效） | 稳态不变 | – | – | 不变 | – | 保留 | 首次编译 40 s；有缓存 10 s；删 /tmp 缓存（模拟重启）后 7.5 s，不再重编译（原 90 s） |
 
 ### 第 12 项过程记录（上限试验 `prof/pd_spike.py` → `results/r2/pd_spike*`）
 - MSDA 插件单测：与上游 CUDA 核逐位一致（max diff 0）。
@@ -38,4 +39,4 @@
 - seg.model 同时 −5 ms：不再从 pageable 内存上传预处理后的 uint8 输入。
 
 ### 其他
-- 静默回退：Inductor 缓存实际写在 /tmp/torchinductor_qiao，而非 weights/inductor_cache（待修，见候选 F）。
+- 静默回退：Inductor 缓存实际写在 /tmp/torchinductor_qiao，而非 weights/inductor_cache（第 16 项已修）。
