@@ -52,11 +52,12 @@ python sbs_portrait_bench.py --frames ~/data/sbs/portrait_0121 --bg ~/data/sbs/b
 
 | 模块 | 实现 | 开关 |
 | ---- | ---- | ---- |
-| 模型输入缩放 | `cv2.resize(INTER_AREA)`，在提交几何线程前执行 | – |
-| backbone | TensorRT FP16 静态形状 engine（`trt_backbone.py`，首次运行自动构建到 `weights/`） | `backbone="trt"` |
-| pixel decoder / transformer decoder | FP16 autocast（MSDA 核保持 FP32）、推理专用 decoder forward、`torch.compile` | `precision="fp16"`、`fast_decoder`、`compile_decoders` |
+| 模型输入缩放 | GPU：OpenCV INTER_AREA 权重 + 归一化融合的 Triton kernel（`area_triton.py`），直接读已上传的整帧 | `pre=[seg.preprocess_gpu(eye)]` |
+| backbone | TensorRT FP16 静态形状 engine（`trt_backbone.py`） | `backbone="trt"` |
+| pixel decoder | TensorRT FP16 engine，MSDA 用内置 `MultiscaleDeformableAttnPlugin_TRT`，位置编码为常量，多尺度特征 NHWC 输出（`trt_pixel_decoder.py`） | `pixel_decoder="trt"` |
+| transformer decoder | 推理专用 forward 导出的 TensorRT FP16 engine，注意力 mask 为有限值加性 mask（`trt_decoder.py`） | `fast_decoder`、`decoder="trt"` |
 | person 后处理 | Triton 融合 kernel（`person_triton.py`），直接输出 960x540 | `fused` |
-| alpha 后处理 + 合成 | GPU（`gpu_post.py`），pinned 缓冲上传 / 回传 | `post="gpu"` |
-| 视差 / 光流 | CPU 工作线程，与 GPU 分割并行 | `overlap` |
+| alpha 后处理 + 合成 | GPU（`gpu_post.py`：精确等价的快速椭圆膨胀、可分离 box），pinned 缓冲上传 / 回传 | `post="gpu"` |
+| 视差 / 光流 | CPU 工作线程，与 GPU 分割并行；结果在工作线程内经独立 copy stream 上传 | `overlap` |
 
-首次运行需构建 TensorRT engine（约 2 分钟，主机内存峰值约 10 GB）并编译 decoder（约 1.5 分钟）；engine 与 Inductor 缓存与 GPU 型号和 TensorRT / PyTorch 版本绑定，不入库。逐项优化的测量结果见 `results/opt/`（`rejected_*` 为已回退的尝试）。
+首次运行在 `weights/` 下构建三个 engine（backbone 约 2 分钟、主机内存峰值约 10 GB；pixel decoder 约 10 s；decoder 约 25 s），之后启动约 7～10 s。engine 与 GPU 型号、TensorRT 版本绑定，不入库。`pixel_decoder="torch"` 路径的 `compile_decoders` 仍可用，其 Inductor 缓存写在 `weights/inductor_cache`。逐项优化的测量结果见 `results/opt/`（`rejected_*` 为已回退的尝试），过程与候选池见 `results/opt/LOG.md`。
