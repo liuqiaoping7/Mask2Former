@@ -82,7 +82,7 @@ class SBSPortraitPipeline:
         s = work_scale
 
         self.seg = PersonSegmenter(config_file, weights, precision=precision, backbone=backbone, eye_hw=(H, W),
-                                   fast_decoder=True, compile_decoders=True, pixel_decoder="trt")
+                                   fast_decoder=True, pixel_decoder="trt", decoder="trt")
         for _ in range(2):  # warm-up
             self.segment_eyes(L0, R0, record=False)
 

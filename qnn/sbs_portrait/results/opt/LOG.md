@@ -26,6 +26,8 @@
 | 14 | 数据流 | 几何结果（灰度、视差、4 个光流，20.8 MB/帧）在几何线程算完即用独立 copy stream 上传，与 GPU 分割重叠 | 166.4（−2.1） | 1972 | 2636 | 3.5e-4 / 0.9981 / 0.9872 | 0.0122 | 保留 | gpu.post 13.0→7.8 ms；原同步路径上传 4.6 ms，部分本已与计算重叠，端到端 −2.1 ms（p95−中位 0.3 ms，>波动） |
 | 15 | 算法 | 后处理：31×31 椭圆膨胀改为行内最近前景距离 + 按行半宽判定（与卷积逐像素一致），9×9 box 改可分离并批量化 | 163.0（−3.4） | 1970 | 2597 | 3.5e-4 / 0.9981 / 0.9872 | 0.0122 | 保留 | gpu.post 7.8→4.5 ms；膨胀 2.15→0.40 ms/次（原为 961 抽头 TF32 卷积，占后处理 52%） |
 | 16 | 空间 / 冷启动 | Inductor 缓存真正写到 weights/inductor_cache（cache_dir() 首次调用会把 /tmp 默认值写回环境变量，setdefault 失效） | 稳态不变 | – | – | 不变 | – | 保留 | 首次编译 40 s；有缓存 10 s；删 /tmp 缓存（模拟重启）后 7.5 s，不再重编译（原 90 s） |
+| ✗ | 系统 | 解码线程把帧直接写进双缓冲 pinned 暂存区，主线程只发 H2D | 162.6（−0.4） | 2006 | 2605 | 不变 | 0.0122 | 回退 | 收益 < 波动（~0.7 ms）：同步模式 upload_frame 2.7→0.1 ms，但 GPU 已饱和（95.5%），该 CPU 拷贝与其他 GPU 工作重叠，不在关键路径 |
+| 17 | 引擎 | transformer decoder → TensorRT FP16（位置编码常量化，注意力 mask 改有限值 -1e4 加性 mask，NHWC/FP16 输入零拷贝衔接 pixel decoder engine），不再需要 torch.compile | 152.0（−11.0） | 1684 | 2264 | 3.5e-4 / 0.9981 / 0.9872 | 0.0122 | 保留，冻结 decoder 引擎 | 每眼 decoder 9.2→4.2 ms；显存 −286 MB、RSS −333 MB（不加载 Inductor 编译栈） |
 
 ### 第 12 项过程记录（上限试验 `prof/pd_spike.py` → `results/r2/pd_spike*`）
 - MSDA 插件单测：与上游 CUDA 核逐位一致（max diff 0）。
@@ -37,6 +39,11 @@
 - 预取线程里做下一帧预处理只缩短循环周期，不降低单帧延迟，未采用；改为 GPU 预处理（原帧本来就上传给合成用）。
 - gather + sum 实现 2.1 ms/眼（K 倍中间张量），GPU 是瓶颈时净收益只有 ~3 ms；融合 Triton kernel 0.09 ms/眼。
 - seg.model 同时 −5 ms：不再从 pageable 内存上传预处理后的 uint8 输入。
+
+### 第 17 项过程记录（`prof/td_spike.py` → `results/r2/td_spike*`）
+- FP32 engine 误差 8%～13% → 同 pixel decoder，位置编码在 TRT 中算错；常量化后 FP32 engine 与编译版误差相同。
+- FP16 engine 输出 NaN：固定 Norm 或全部非 GEMM 层为 FP32 都无效；原因是 nn.MultiheadAttention 的 -inf 加性 mask 在 FP16 融合注意力中产生 NaN，改为有限值 -1e4（exp 下精确为 0）后正常：logits/masks 误差 2.9%/3.8%（编译版 1.7%/2.2%），mask 正负号一致率 99.972%（99.982%）。
+- 导出时 `if bs == 1` 被固化为常量：engine 本就是静态 batch 1，不依赖数据。
 
 ### 其他
 - 静默回退：Inductor 缓存实际写在 /tmp/torchinductor_qiao，而非 weights/inductor_cache（第 16 项已修）。

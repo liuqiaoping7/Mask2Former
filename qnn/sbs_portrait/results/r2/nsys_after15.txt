@@ -1,0 +1,13 @@
+frames 25  wall/frame 160.9 ms  GPU busy 153.7 ms (95.5%)
+memcpy HtoD: 10/frame 32.6 MB/frame 6.55 ms/frame
+memcpy DtoH: 1/frame 11.9 MB/frame 1.15 ms/frame
+memcpy DtoD: 4/frame 7.9 MB/frame 0.03 ms/frame
+runtime cudaStreamSynchronize: 2 calls/frame 52.8 ms/frame
+runtime cudaDeviceSynchronize: 1 calls/frame 0.0 ms/frame
+runtime cudaEventSynchronize: 0 calls/frame 0.0 ms/frame
+runtime cudaLaunchKernel: 612 calls/frame 7.7 ms/frame
+runtime cudaMemcpyAsync: 15 calls/frame 0.2 ms/frame
+largest GPU idle gaps (> 0.2 ms), ms/frame:
+    2.87  x1.0  frame start  ->  M:1
+    1.41  x1.0  M:2  ->  frame end
+    1.09  x0.5  K:_area_norm_kernel  ->  K:vectorized_elementwise_kernel

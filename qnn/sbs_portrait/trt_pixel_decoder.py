@@ -51,7 +51,7 @@ class _ConstPE(torch.nn.Module):
             for h, w in hws:
                 self.register_buffer(f"pe_{h}x{w}", pe(torch.zeros(1, 1, h, w, device=device)))
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         return getattr(self, f"pe_{x.shape[-2]}x{x.shape[-1]}").to(x.dtype)
 
 

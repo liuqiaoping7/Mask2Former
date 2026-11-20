@@ -1,0 +1,14 @@
+{
+ "trt_ms": 7.012272119522095,
+ "compiled_ms": 8.917984008789062,
+ "trt": {
+  "logits_rel": NaN,
+  "masks_rel": 0.995092511177063,
+  "mask_sign_agree": 0.8939862847328186
+ },
+ "compiled_fp16": {
+  "logits_rel": 0.016673970967531204,
+  "masks_rel": 0.022424913942813873,
+  "mask_sign_agree": 0.9998178482055664
+ }
+}
