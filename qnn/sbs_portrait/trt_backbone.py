@@ -11,6 +11,7 @@ profiles (trt_common.PROFILES).
 """
 import os
 
+import tensorrt as trt
 import torch
 
 import trt_common as tc
@@ -30,9 +31,11 @@ class _Wrap(torch.nn.Module):
         return tuple(o[k] for k in LEVELS)
 
 
-def build_engine(backbone, plan, profiles, fp16=True, trace_hw=(800, 1088), workspace_gb=2, batch=1, log=print):
+def build_engine(backbone, plan, profiles, fp16=True, trace_hw=(800, 1088), workspace_gb=2, batch=1, out_fp16=False,
+                 log=print):
     """profiles: model-input (min, opt, max) HxW list. trace_hw: export size (any size works with
-    the shape-generic forwards; this one needs window padding at every stage)."""
+    the shape-generic forwards; this one needs window padding at every stage). out_fp16: FP16 feature
+    outputs (half the inter-engine tensors; the FP16 pixel decoder converts them to FP16 anyway)."""
     onnx_path = os.path.splitext(plan)[0] + ".onnx"
     axes = {"image": {2: "H", 3: "W"}, **{k: {2: f"h{k}", 3: f"w{k}"} for k in LEVELS}}
     with torch.no_grad(), swin_dynamic():
@@ -40,6 +43,7 @@ def build_engine(backbone, plan, profiles, fp16=True, trace_hw=(800, 1088), work
                           opset_version=17, input_names=["image"], output_names=list(LEVELS),
                           dynamic_axes=axes, dynamo=False)
     tc.build(onnx_path, plan, profiles, lambda h, w: {"image": (1, 3, h, w)}, fp16=fp16,
+             out_dtypes={k: trt.float16 for k in LEVELS} if out_fp16 else None,
              workspace_gb=workspace_gb, batch=batch, log=log)
     os.remove(onnx_path)  # ~0.8 GB intermediate; re-export takes seconds
 

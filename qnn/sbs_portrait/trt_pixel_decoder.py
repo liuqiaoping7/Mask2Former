@@ -79,7 +79,7 @@ def stage_shapes(chans):
 
 
 def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trace_hw=(800, 1088),
-                 workspace_gb=2, batch=1, msda="builtin", detailed=False, log=print):
+                 workspace_gb=2, batch=1, msda="builtin", detailed=False, in_fp16=False, log=print):
     """profiles: model-input (min, opt, max) HxW list; chans: backbone channels per level.
     Writes `plan` (timing cache next to it).
 
@@ -88,7 +88,8 @@ def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trac
     normalised location in [0, 1] is only good to ~1e-3, i.e. ~0.2 px on the 168-wide level);
     "norm": LayerNorm / GroupNorm.
     msda: "builtin" -- TensorRT's MultiscaleDeformableAttnPlugin_TRT (FP32 / FP16); "upstream" -- the
-    plugin wrapping this project's MSDeformAttn CUDA kernel (FP32 only, trt_msda_plugin.py)."""
+    plugin wrapping this project's MSDeformAttn CUDA kernel (FP32 only, trt_msda_plugin.py).
+    in_fp16: FP16 feature inputs (pairs with trt_backbone.build_engine(out_fp16=True))."""
     from mask2former.modeling.pixel_decoder.ops.modules import ms_deform_attn as msda_mod
 
     chans = chans or {"res2": 192, "res3": 384, "res4": 768, "res5": 1536}
@@ -124,6 +125,7 @@ def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trac
 
     # FP16 outputs: what the FP16 transformer decoder consumes
     tc.build(onnx_path, plan, profiles, shapes, fp16=fp16, plugins=True, configure=configure,
+             in_dtypes={k: trt.float16 for k in IN} if in_fp16 else None,
              out_dtypes={k: trt.float16 for k in OUT} if fp16 else None, workspace_gb=workspace_gb, batch=batch,
              detailed=detailed, log=log)
     os.remove(onnx_path)

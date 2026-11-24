@@ -56,7 +56,7 @@ python sbs_portrait_bench.py --frames ~/data/sbs/portrait_0121 --bg ~/data/sbs/b
 | backbone | TensorRT FP16 动态形状 engine，形状无关的 Swin 导出（`dyn_export.py`、`trt_backbone.py`） | `backbone="trt"`、`profiles` |
 | pixel decoder | TensorRT FP16 engine，MSDA 用内置 `MultiscaleDeformableAttnPlugin_TRT`，闭式位置编码，多尺度特征 NHWC 输出（`trt_pixel_decoder.py`） | `pixel_decoder="trt"` |
 | transformer decoder | 推理专用 forward 导出的 TensorRT FP16 engine，注意力 mask 为有限值加性 mask（`trt_decoder.py`） | `fast_decoder`、`decoder="trt"` |
-| TensorRT 运行时 | 多 optimization profile（常见离散尺寸用精确 profile + ranged 兜底），共享激活内存、按最大形状分配的输出缓冲、懒创建执行上下文（`trt_common.py`） | `profiles="exact"` |
+| TensorRT 运行时 | 多 optimization profile（常见离散尺寸用精确 profile + ranged 兜底），懒创建执行上下文；三段以线性链运行在一个乒乓 arena 里（只保留存活的 scratch 与段间张量，段间特征 FP16），1080p 显存峰值 1078 MB（`trt_common.py` 的 `TRTChain`） | `profiles="exact"`、`trt_arena`、`fp16_features` |
 | person 后处理 | Triton 融合 kernel（`person_triton.py`），直接输出到工作网格 | `fused` |
 | alpha 后处理 + 合成 | GPU（`gpu_post.py`：精确等价的快速椭圆膨胀、可分离 box），pinned 缓冲上传 / 回传 | `post="gpu"` |
 | 视差 / 光流 | CPU 工作线程，与 GPU 分割并行；结果在工作线程内经独立 copy stream 上传；几何晚于 GPU 时自动拆成 4 路并行 | `geo_threads`、`geo_late_ms` |
