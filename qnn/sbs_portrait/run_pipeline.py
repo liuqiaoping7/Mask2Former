@@ -1,7 +1,7 @@
 """Run the production pipeline on an SBS frame sequence and record latency / memory.
 
   python run_pipeline.py --frames DIR --bg BG.jpg --out OUT [--dump] [--profile]
-                         [--mode opt|ref] [--size-policy official|native] [--profiles multires]
+                         [--mode opt|ref] [--size-policy official|native] [--profiles exact]
 
 --profile : synchronize CUDA around GPU modules for a per-module breakdown
             (end-to-end numbers of a --profile run include those syncs).
@@ -149,7 +149,7 @@ def main():
     ap.add_argument("--skip", type=int, default=5, help="warm-up frames excluded from latency stats")
     ap.add_argument("--mode", default="opt", choices=("opt", "ref"))
     ap.add_argument("--size-policy", default="official", choices=("official", "native"))
-    ap.add_argument("--profiles", default="multires", help="trt_common.PROFILE_SETS name")
+    ap.add_argument("--profiles", default="exact", help="trt_common.PROFILE_SETS name")
     args = ap.parse_args()
     files = sorted(glob(os.path.join(args.frames, "*.jpg")))[: args.max_frames]
     keys = {int(k) for k in args.key_frames.split(",") if k}

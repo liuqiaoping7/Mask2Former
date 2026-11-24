@@ -1,7 +1,7 @@
 """Several eye resolutions in one process (one segmenter / one set of dynamic-shape engines).
 
   python run_multires.py --sets ~/data/sbs/mr/frames --bg BG.jpg --out OUT [--sizes 640x480,...]
-                         [--mode opt|ref] [--size-policy official|native] [--profiles multires]
+                         [--mode opt|ref] [--size-policy official|native] [--profiles exact]
                          [--dump] [--profile] [--interleave N]
 
 Sequential (default): the sequences are processed one after the other, as a service receiving
@@ -56,7 +56,7 @@ def main():
     ap.add_argument("--max-frames", type=int, default=150)
     ap.add_argument("--mode", default="opt", choices=("opt", "ref"))
     ap.add_argument("--size-policy", default="official", choices=("official", "native"))
-    ap.add_argument("--profiles", default="multires")
+    ap.add_argument("--profiles", default="exact")
     ap.add_argument("--profile", action="store_true", help="sync per GPU module (module breakdown)")
     ap.add_argument("--dump", action="store_true")
     ap.add_argument("--key-frames", default="0,75,149")

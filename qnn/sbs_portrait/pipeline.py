@@ -94,7 +94,7 @@ class Timer:
 class SBSPortraitPipeline:
     def __init__(self, first_frame, bg_sbs, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS,
                  work_pixels=WORK_PIXELS, soft=(0.4, 0.6), gf_eps=1e-4, lam=0.7, gate=0.5, bg_margin=4.0,
-                 mode="opt", seg=None, size_policy="official", profiles="multires", timer=None):
+                 mode="opt", seg=None, size_policy="official", profiles="exact", timer=None):
         """mode: "opt" -- the optimized pipeline (TensorRT engines with dynamic-shape profiles,
         GPU pre / post-processing, CPU geometry overlapped in a worker thread); "ref" -- the
         reference: PyTorch FP32 model, torch person post-processing, CPU (OpenCV / numpy)

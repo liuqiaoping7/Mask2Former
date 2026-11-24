@@ -6,7 +6,7 @@
 # 2) same with CUDA sync per GPU module, 40 frames: per-module breakdown per size
 # 3) offline eval per size: 3D quality + error vs <ref_name> (same size)
 set -euo pipefail
-NAME=$1; MODE=$2; POLICY=$3; PROFILES=${4:-multires}; REF=${5:-}
+NAME=$1; MODE=$2; POLICY=$3; PROFILES=${4:-exact}; REF=${5:-}
 PY=${PY:-python}; DATA=${SBS_DATA:-$HOME/data/sbs}
 cd "$(dirname "$0")"
 RUN=$DATA/mr/$NAME; mkdir -p "$RUN"

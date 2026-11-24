@@ -28,7 +28,7 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
                  backbone="torch", eye_hw=None, trt_plan=None, fused=True, fast_decoder=False,
-                 compile_decoders=False, pixel_decoder="torch", decoder="torch", profiles="multires",
+                 compile_decoders=False, pixel_decoder="torch", decoder="torch", profiles="exact",
                  size_policy="official"):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is

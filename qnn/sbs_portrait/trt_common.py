@@ -5,9 +5,14 @@ per stage covers all of them with a set of optimization profiles; TensorRT picks
 profile for its `opt` shape, so a narrow profile around a frequent size (the 1080p input,
 min = opt = max) runs like the former static engine while wider profiles cover the rest.
 
-Profile sets (PROFILE_SETS): "multires" (default) -- the 1080p input as its own min = opt = max
-profile plus ranged buckets ("official" 768..800 x 1088..1344, "small" 480..608 lines, "mid"
-608..800 lines); "wide" -- a single profile 480x640 .. 800x1344 (comparison only).
+Profile sets (PROFILE_SETS): "exact" (default) -- one min = opt = max profile per discrete input
+of the official size policy (768x1344 for 16:9, 800 x 1088..1344 for 4:3 .. 5:3) plus ranged
+buckets for anything else ("official" 768..800 x 1088..1344, "small"
+480..608 lines, "mid" 608..800 lines; native policy); "multires" -- p1080 + the three ranged
+buckets; "wide" -- a single profile 480x640 .. 800x1344 (comparison only).
+Measured per eye (prof/profile_spike.py): exact profiles are as fast as the former static engine
+(768x1344: 64.1 vs 63.6 ms) and 4-6% faster than a ranged bucket at the same shape; a single
+wide profile is 3-16% slower than the buckets.
 
 Profiles are given on the model input (H, W); each stage derives its input shapes from it:
   backbone      image (1, 3, H, W)
@@ -16,7 +21,7 @@ Profiles are given on the model input (H, W); each stage derives its input shape
 
 TRTRunner runs a plan on torch tensors:
   * picks the narrowest profile containing the input shapes (cached per shape),
-  * one execution context per profile (created at load); all contexts of all engines share one
+  * one execution context per profile (created on first use); all contexts of all engines share one
     activation buffer (USER_MANAGED): the stages run one after another on one stream, so the
     activation memory is the largest single requirement instead of the sum,
   * one buffer per output sized for the largest shape of any profile; each call returns
@@ -46,6 +51,11 @@ PROFILE_SETS = {
     "wide": ("wide",),
 }
 PROFILES["wide"] = ((480, 640), (704, 1216), (800, 1344))  # one profile for everything (comparison)
+# exact (min = opt = max) profiles for the discrete official-policy inputs of 4:3 .. 16:9 eyes:
+# shortest edge 800 -> 800 x 1067..1333, padded 800 x 1088..1344; wider eyes -> 768 x 1344 (p1080)
+for _w in range(1088, 1344 + 1, 32):
+    PROFILES[f"o800x{_w}"] = ((800, _w),) * 3
+PROFILE_SETS["exact"] = ("p1080", *(f"o800x{w}" for w in range(1088, 1344 + 1, 32)), "official", "small", "mid")
 
 
 def profile_list(name_or_list):
@@ -159,22 +169,22 @@ class TRTRunner:
         self.ranges = [{n: e.get_tensor_profile_shape(n, p) for n in self.inputs} for p in range(n_prof)]
         self.pool = POOL
         self.pool.ensure(max(e.get_device_memory_size_for_profile_v2(p) for p in range(n_prof)))
+        # output sizes at every profile's max shapes, from one probe context switched through the
+        # profiles; the execution contexts are created on first use (each holds host memory: all
+        # 3 x 14 of the "exact" set cost ~2 GB of RSS)
         stream = torch.cuda.current_stream()
-        self.ctx, numel = [], {n: 0 for n in self.outputs}
-        for p in range(n_prof):  # one context per profile, output sizes at the profile's max shapes
-            ctx = e.create_execution_context(trt.ExecutionContextAllocationStrategy.USER_MANAGED)
-            ctx.set_optimization_profile_async(p, stream.cuda_stream)
-            self.pool.register(ctx)
+        numel = {n: 0 for n in self.outputs}
+        probe = e.create_execution_context(trt.ExecutionContextAllocationStrategy.USER_MANAGED)
+        for p in range(n_prof):
+            probe.set_optimization_profile_async(p, stream.cuda_stream)
+            stream.synchronize()
             for n in self.inputs:
-                ctx.set_input_shape(n, self.ranges[p][n][2])
+                probe.set_input_shape(n, self.ranges[p][n][2])
             for n in self.outputs:
-                numel[n] = max(numel[n], _vol(ctx.get_tensor_shape(n)))
-            self.ctx.append(ctx)
-        stream.synchronize()
+                numel[n] = max(numel[n], _vol(probe.get_tensor_shape(n)))
+        del probe
         self.buf = {n: torch.empty(numel[n], dtype=self.out_dtype[n], device="cuda") for n in self.outputs}
-        for ctx in self.ctx:
-            for n in self.outputs:
-                ctx.set_tensor_address(n, self.buf[n].data_ptr())
+        self.ctx = [None] * n_prof
         self.cur = [None] * n_prof        # input shapes currently set on each context
         self.out_shape = [None] * n_prof
         self.pick_cache = {}
@@ -204,6 +214,12 @@ class TRTRunner:
         shapes = tuple(tuple(x.shape) for x in xs)
         p = self.profile_for(shapes)
         ctx = self.ctx[p]
+        if ctx is None:
+            ctx = self.ctx[p] = self.engine.create_execution_context(trt.ExecutionContextAllocationStrategy.USER_MANAGED)
+            ctx.set_optimization_profile_async(p, stream.cuda_stream)
+            self.pool.register(ctx)
+            for n in self.outputs:
+                ctx.set_tensor_address(n, self.buf[n].data_ptr())
         if self.cur[p] != shapes:
             for n, s in zip(self.inputs, shapes):
                 ctx.set_input_shape(n, s)
