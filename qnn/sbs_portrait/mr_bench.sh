@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Multi-resolution measurement (results in results/mr/<name>/), the multi-res counterpart of opt_step.sh.
 #   ./mr_bench.sh <name> <mode> <size_policy> [profiles] [ref_name]
-#   env: PY (python), SBS_DATA (default ~/data/sbs), SIZES (comma list, default all of sizes.json)
+#   env: PY (python), SBS_DATA (default ~/data/sbs), SIZES (comma list, default all of sizes.json),
+#        COMPOSE (compositing kernel, default triton)
 # 1) all sizes in one process, full 150 frames, no extra syncs: latency, NVML / RSS peaks, dumps
 # 2) same with CUDA sync per GPU module, 40 frames: per-module breakdown per size
 # 3) offline eval per size: 3D quality + error vs <ref_name> (same size)
@@ -13,6 +14,7 @@ RUN=$DATA/mr/$NAME; mkdir -p "$RUN"
 SETS=$DATA/mr/frames
 ARGS="--sets $SETS --bg $DATA/bg_0045/0001.jpg --mode $MODE --size-policy $POLICY --profiles $PROFILES"
 [ -n "${SIZES:-}" ] && ARGS="$ARGS --sizes $SIZES"
+[ -n "${COMPOSE:-}" ] && ARGS="$ARGS --compose-kernel $COMPOSE"
 $PY run_multires.py $ARGS --out "$RUN/run" --dump > "$RUN/run.log" 2>&1 || { tail -20 "$RUN/run.log"; exit 1; }
 if [ "$MODE" = opt ]; then
   $PY run_multires.py $ARGS --out "$RUN/prof" --profile --max-frames 40 --key-frames "" > "$RUN/prof.log" 2>&1 || { tail -20 "$RUN/prof.log"; exit 1; }

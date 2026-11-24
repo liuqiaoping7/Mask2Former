@@ -138,6 +138,18 @@ def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5)
     return stats
 
 
+def pip_source(arg):
+    """--pip value -> SBSPortraitPipeline pip argument."""
+    if not arg:
+        return None
+    if arg == "frame":
+        return "frame"
+    if arg == "icon":
+        from pip_compose import make_icon
+        return make_icon(512)
+    return cv2.imread(arg, cv2.IMREAD_UNCHANGED)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", required=True)
@@ -150,6 +162,8 @@ def main():
     ap.add_argument("--skip", type=int, default=5, help="warm-up frames excluded from latency stats")
     ap.add_argument("--mode", default="opt", choices=("opt", "ref"))
     ap.add_argument("--size-policy", default="official", choices=("official", "native", "aligned"))
+    ap.add_argument("--pip", default="", help="picture-in-picture: frame | icon | <SBS RGBA png>")
+    ap.add_argument("--compose-kernel", default="triton", help="pip_compose.KINDS")
     ap.add_argument("--profiles", default="exact", help="trt_common.PROFILE_SETS name")
     args = ap.parse_args()
     files = sorted(glob(os.path.join(args.frames, "*.jpg")))[: args.max_frames]
@@ -160,7 +174,8 @@ def main():
     t_init = time.perf_counter()
     timer = Timer(sync=args.profile)
     pipe = SBSPortraitPipeline(cv2.imread(files[0]), cv2.imread(args.bg), timer=timer, mode=args.mode,
-                               size_policy=args.size_policy, profiles=args.profiles)
+                               size_policy=args.size_policy, profiles=args.profiles, pip=pip_source(args.pip),
+                               compose_kernel=args.compose_kernel)
     init_s = time.perf_counter() - t_init
     stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip)
     mon.stop()

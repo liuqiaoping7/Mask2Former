@@ -1,0 +1,125 @@
+{
+ "commit": "d64567c",
+ "mode": "opt",
+ "size_policy": "official",
+ "profiles": "exact",
+ "seg_init_s": 9.176907339016907,
+ "sizes": {
+  "1920x1080": {
+   "e2e_ms": {
+    "median": 153.07553100865334,
+    "mean": 153.23408194152373,
+    "p95": 156.07075750012882,
+    "std": 1.3694846869700457,
+    "first": 308.9714259840548
+   },
+   "fps": 6.5327227245971144,
+   "init_s": 0.9860936809564009,
+   "work_wh": [
+    960,
+    540
+   ],
+   "model_input_hw": [
+    750,
+    1333
+   ],
+   "padded_hw": [
+    768,
+    1344
+   ],
+   "gpu_mem_peak_mb_nvml": 1972.0,
+   "rss_peak_mb": 4425.6796875,
+   "profile": 0,
+   "modules_ms": {
+    "seg.model": 131.23,
+    "geo.flow": 58.66,
+    "geo.disparity": 39.71,
+    "seg.person": 5.81,
+    "geo.upload": 5.0,
+    "gpu.compose+d2h": 4.93,
+    "gpu.post": 4.45,
+    "gpu.upload_frame": 2.69
+   }
+  },
+  "1280x720": {
+   "e2e_ms": {
+    "median": 145.8635239978321,
+    "mean": 146.3734736832391,
+    "p95": 149.57415268872865,
+    "std": 1.7086794743856455,
+    "first": 169.58467999938875
+   },
+   "fps": 6.8557235735978965,
+   "init_s": 0.5954712759703398,
+   "work_wh": [
+    960,
+    540
+   ],
+   "model_input_hw": [
+    750,
+    1333
+   ],
+   "padded_hw": [
+    768,
+    1344
+   ],
+   "gpu_mem_peak_mb_nvml": 1798.0,
+   "rss_peak_mb": 4480.9296875,
+   "profile": 0,
+   "modules_ms": {
+    "seg.model": 129.34,
+    "geo.flow": 58.89,
+    "geo.disparity": 36.65,
+    "geo.downscale": 5.95,
+    "seg.person": 5.79,
+    "geo.upload": 4.99,
+    "gpu.post": 4.41,
+    "gpu.compose+d2h": 2.19
+   }
+  },
+  "640x480": {
+   "e2e_ms": {
+    "median": 131.4450210193172,
+    "mean": 131.7030175439348,
+    "p95": 134.38798082643189,
+    "std": 1.8062867755114238,
+    "first": 140.15824295347556
+   },
+   "fps": 7.607743467537197,
+   "init_s": 0.48721821198705584,
+   "work_wh": [
+    640,
+    480
+   ],
+   "model_input_hw": [
+    800,
+    1067
+   ],
+   "padded_hw": [
+    800,
+    1088
+   ],
+   "gpu_mem_peak_mb_nvml": 1694.0,
+   "rss_peak_mb": 4485.00390625,
+   "profile": 1,
+   "modules_ms": {
+    "seg.model": 122.7,
+    "geo.flow": 32.91,
+    "geo.disparity": 22.35,
+    "seg.person": 3.47,
+    "geo.upload": 3.27,
+    "gpu.post": 2.89,
+    "geo.downscale": 0.81,
+    "gpu.compose+d2h": 0.65
+   }
+  }
+ },
+ "gpu_mem_peak_mb_nvml": 1972.0,
+ "rss_peak_mb": 4485.00390625,
+ "ru_maxrss_mb": 4483.59765625,
+ "shape_switches": {
+  "backbone": 2,
+  "pixel_decoder": 2,
+  "decoder": 2
+ }
+}

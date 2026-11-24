@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 from pipeline import SBSPortraitPipeline, Timer, split_sbs
-from run_pipeline import MemMonitor, git_rev, run_sequence
+from run_pipeline import MemMonitor, git_rev, pip_source, run_sequence
 from seg import DEFAULT_CONFIG, DEFAULT_WEIGHTS, PersonSegmenter
 
 
@@ -56,6 +56,8 @@ def main():
     ap.add_argument("--max-frames", type=int, default=150)
     ap.add_argument("--mode", default="opt", choices=("opt", "ref"))
     ap.add_argument("--size-policy", default="official", choices=("official", "native", "aligned"))
+    ap.add_argument("--pip", default="", help="picture-in-picture: frame | icon | <SBS RGBA png>")
+    ap.add_argument("--compose-kernel", default="triton", help="pip_compose.KINDS")
     ap.add_argument("--profiles", default="exact")
     ap.add_argument("--profile", action="store_true", help="sync per GPU module (module breakdown)")
     ap.add_argument("--dump", action="store_true")
@@ -85,7 +87,8 @@ def main():
             timer = Timer(sync=a.profile)
             mon.reset()
             t1 = time.perf_counter()
-            pipe = SBSPortraitPipeline(cv2.imread(files[s][0]), bg, mode=a.mode, seg=seg, timer=timer)
+            pipe = SBSPortraitPipeline(cv2.imread(files[s][0]), bg, mode=a.mode, seg=seg, timer=timer,
+                                       pip=pip_source(a.pip), compose_kernel=a.compose_kernel)
             init_s = time.perf_counter() - t1
             st = run_sequence(pipe, files[s], os.path.join(a.out, s), timer, mon, a.dump, keys, a.skip)
             pipe.close()

@@ -95,7 +95,7 @@ class SBSPortraitPipeline:
     def __init__(self, first_frame, bg_sbs, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS,
                  work_pixels=WORK_PIXELS, soft=(0.4, 0.6), gf_eps=1e-4, lam=0.7, gate=0.5, bg_margin=4.0,
                  mode="opt", seg=None, size_policy="official", profiles="exact", geo_threads=4,
-                 geo_late_ms=5.0, timer=None):
+                 pip=None, compose_kernel="triton", geo_late_ms=5.0, timer=None):
         """mode: "opt" -- the optimized pipeline (TensorRT engines with dynamic-shape profiles,
         GPU pre / post-processing, CPU geometry overlapped in a worker thread); "ref" -- the
         reference: PyTorch FP32 model, torch person post-processing, CPU (OpenCV / numpy)
@@ -114,7 +114,11 @@ class SBSPortraitPipeline:
         events (segmentation done -> an event recorded when the geometry returns), averaged from
         the 11th frame on (EMA 0.1); the main thread's wait is no criterion: it reaches the wait
         while the GPU is still segmenting. Measured steady idle: 676x504 ~2.5 ms (stays serial,
-        parallel would cost 2.6 ms), 854x480 ~7 ms, 960x540 ~19 ms (switch)."""
+        parallel would cost 2.6 ms), 854x480 ~7 ms, 960x540 ~19 ms (switch).
+        pip: picture-in-picture in the top-right corner of each eye, (H/8, W/8): None, "frame" (the
+        local SBS input frame) or an SBS RGBA image (numpy (h, 2w, 4) u8, e.g. a 3D icon); placed at
+        the person's disparity plus the background margin, so it is never behind the person.
+        compose_kernel: compositing (+ PiP) implementation, see pip_compose.KINDS."""
         self.timer = timer or Timer()
         assert mode in ("opt", "ref")
         post, overlap = ("gpu", True) if mode == "opt" else ("cpu", False)
@@ -171,7 +175,17 @@ class SBSPortraitPipeline:
         self.prev_g = None
         self.post = post
         self.pool = ThreadPoolExecutor(1, thread_name_prefix="geometry") if overlap else None
+        self.pip = pip
+        self.pip_lay = None
+        if pip is not None:
+            from pip_compose import pip_layout
+            self.pip_disp = max(0.0, self.person_disp / s) + bg_margin * W / 1920.0
+            self.pip_lay = pip_layout(H, W, self.pip_disp)
         if post == "gpu":
+            from pip_compose import Composer
+            bg_hwc = torch.from_numpy(np.ascontiguousarray(np.hstack([bgL, bgR]))).cuda()
+            self.composer = Composer(H, W, ws, bg_hwc, kind=compose_kernel, src=pip,
+                                     disparity=self.pip_disp if pip is not None else 0.0)
             self.gp = GPUPost(ws, bgL, bgR, soft=soft, gf=self.gf, lam=lam, gate=gate, person_disp=self.person_disp,
                               ellipse=prm["ellipse"], core=prm["core"])
             self.up_stream = torch.cuda.Stream()  # geometry results are uploaded from the worker thread
@@ -248,7 +262,11 @@ class SBSPortraitPipeline:
             AR = cv2.resize(aR, (W, H), interpolation=cv2.INTER_LINEAR)[..., None]
             cl = L.astype(np.float32) * AL + self.bgL.astype(np.float32) * (1.0 - AL)
             cr = R.astype(np.float32) * AR + self.bgR.astype(np.float32) * (1.0 - AR)
-            return np.hstack([cl, cr]).clip(0, 255).astype(np.uint8)
+            out = np.hstack([cl, cr]).clip(0, 255).astype(np.uint8)
+            if self.pip is not None:
+                from pip_compose import apply_pip_cpu
+                apply_pip_cpu(out, np.hstack([L, R]) if isinstance(self.pip, str) else self.pip, self.pip_lay)
+            return out
 
     # ------------------------------------------------------------------ frame
     def process(self, frame):
@@ -304,7 +322,7 @@ class SBSPortraitPipeline:
             tR = gp.ema("R", gp.guided(gRt / 255.0, sR), fbR, vR, phR)
             aL, aR = gp.fusion(tL, tR, dLf, dRf)
         with tm("gpu.compose+d2h", gpu=True):
-            out = gp.pin.down("out", gp.compose(frame_t, aL, aR))
+            out = gp.pin.down("out", self.composer(frame_t, aL, aR))
         return {"out": out, "aL": aL, "aR": aR, "pL": pL, "pR": pR, "hL": hL, "hR": hR}
 
     def cpu_geometry(self, L, R, upload=False):
