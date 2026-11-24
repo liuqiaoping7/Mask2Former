@@ -78,7 +78,7 @@ def plan_tag(profiles):
 
 
 def build(onnx_path, plan, profiles, stage_shapes, fp16=True, in_dtypes=None, out_dtypes=None,
-          configure=None, workspace_gb=2, plugins=False, batch=1, log=print):
+          configure=None, workspace_gb=2, plugins=False, batch=1, detailed=False, log=print):
     """Parse onnx_path and build plan with one optimization profile per entry of `profiles`
     (model-input (min, opt, max) HxW); stage_shapes(H, W) -> {input name: shape}.
     configure(net, cfg): extra network / config edits (precision pins)."""
@@ -106,11 +106,13 @@ def build(onnx_path, plan, profiles, stage_shapes, fp16=True, in_dtypes=None, ou
         cfg.set_flag(trt.BuilderFlag.FP16)
     else:  # strict FP32 (conversion checks): no TF32 tactics
         cfg.clear_flag(trt.BuilderFlag.TF32)
+    if detailed:  # per-layer precision / formats visible to the engine inspector
+        cfg.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     if configure:
         configure(net, cfg)
     for lo, opt, hi in profiles:
         p = builder.create_optimization_profile()
-        s_lo, s_opt, s_hi = (with_batch(stage_shapes(*x), batch) for x in (lo, opt, hi))
+        s_lo, s_opt, s_hi = (stage_shapes(*x) if batch == 1 else with_batch(stage_shapes(*x), batch) for x in (lo, opt, hi))
         for name in s_lo:
             p.set_shape(name, s_lo[name], s_opt[name], s_hi[name])
         cfg.add_optimization_profile(p)

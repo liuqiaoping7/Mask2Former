@@ -29,7 +29,7 @@ class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
                  backbone="torch", eye_hw=None, trt_plan=None, fused=True, fast_decoder=False,
                  compile_decoders=False, pixel_decoder="torch", decoder="torch", profiles="exact",
-                 size_policy="official", batch=1):
+                 size_policy="official", batch=1, msda_plugin="builtin"):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
@@ -46,6 +46,8 @@ class PersonSegmenter:
         windows; stage 3 = 18 of the 24 blocks at 1/16 scale, so a side of 800 -> 50 tokens runs
         as 60, +20% work; 768 -> 48 needs none). Non-uniform resize, mapped back exactly by person().
         batch: engine batch size (2 = both eyes in one call: person() then takes both eyes).
+        msda_plugin: MSDA in the pixel-decoder engine -- "builtin" (TensorRT's plugin) or "upstream"
+        (plugin wrapping this project's CUDA kernel, FP32 only; comparison reference, trt_msda_plugin.py).
         eye_hw / trt_plan: ignored (static engines of the 1080p-only version).
         fused: person() post-processing with the fused Triton kernel (person_triton.py) instead
         of the grid_sample / matmul / argmax torch ops.
@@ -108,9 +110,9 @@ class PersonSegmenter:
                 head.predictor.forward = torch.compile(head.predictor.forward, **opts)
         self.trt = self.trt_pd = self.trt_td = None
         if backbone == "trt":
-            self._load_engines(profiles, pixel_decoder, decoder, fast_decoder, batch)
+            self._load_engines(profiles, pixel_decoder, decoder, fast_decoder, batch, msda_plugin)
 
-    def _load_engines(self, profiles, pixel_decoder, decoder, fast_decoder, batch=1):
+    def _load_engines(self, profiles, pixel_decoder, decoder, fast_decoder, batch=1, msda_plugin="builtin"):
         """Build (first use) and load the dynamic-shape engines; releases the torch weights."""
         import trt_common as tc
         from trt_backbone import TRTBackbone
@@ -130,10 +132,11 @@ class PersonSegmenter:
         if pixel_decoder == "trt":
             from trt_pixel_decoder import TRTPixelDecoder
             from trt_pixel_decoder import build_engine as build_pd
-            pd_plan = os.path.join(wdir, f"pixel_decoder_fp16_{tag}.plan")
+            up = "_msdaup" if msda_plugin == "upstream" else ""
+            pd_plan = os.path.join(wdir, f"pixel_decoder_fp16_{tag}{up}.plan")
             if not os.path.exists(pd_plan):
-                build_pd(head.pixel_decoder, pd_plan, prof, chans=chans, batch=batch)
-            self.trt_pd = TRTPixelDecoder(pd_plan)
+                build_pd(head.pixel_decoder, pd_plan, prof, chans=chans, batch=batch, msda=msda_plugin)
+            self.trt_pd = TRTPixelDecoder(pd_plan, msda=msda_plugin)
             head.pixel_decoder.to("meta")
             if decoder == "trt":
                 assert fast_decoder, "the decoder engine is exported from the inference forward"

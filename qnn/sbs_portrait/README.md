@@ -69,5 +69,6 @@ python sbs_portrait_bench.py --frames ~/data/sbs/portrait_0121 --bg ~/data/sbs/b
 - 尺寸策略 `size_policy`：`official`（默认，短边 800 / 长边 ≤ 1333，与 detectron2 测试尺寸一致）、`aligned`（边长对齐 Swin 第三阶段窗口，满足精度容差，非 16:9 尺寸快 5%～14%）、`native`（小图不放大，VGA 2.2 倍提速，边界质量下降）。
 - 后处理在约 960x540 像素的工作网格上进行，像素尺寸的算子按工作网格高度缩放；1080p 时与原实现完全相同。
 - `make_multires.py`：由 1080p 片段生成测试分辨率（6 种常见 + 4 种随机）；`run_multires.py`：一个进程依次 / 交替处理多种分辨率；`mr_bench.sh <name> <mode> <size_policy>`：测量 + 逐模块 + 每种分辨率离线评估，结果在 `results/mr/<name>/`；`prof/mr_tables.py` 生成汇总表。
+- TensorRT plugin 对照：`trt_plugin/msda_upstream_plugin.cu` 是直接包装工程自带 MSDeformAttn CUDA kernel 的 IPluginV3 插件（`trt_msda_plugin.py` 编译 / 加载，需要 TensorRT 头文件，见文件头），`--msda-plugin upstream` 用它代替内置插件；精度对比见 `prof/msda_plugin_spike.py`、`results/mr/msda_plugin/`。
 - 画中画：`--pip frame`（本地 SBS 原图）或 `--pip icon` / `--pip <SBS RGBA png>`，每眼缩放到 H/8 × W/8 放在右上角，深度在人物之前。
 - 试验与结论见 `results/mr/LOG.md`，完整分析见 QNN 仓库 `docs/Mask2Former-sbs-portrait-opt.md` 第十一节。

@@ -1,0 +1,87 @@
+{
+ "shapes": {
+  "value": [
+   1,
+   21168,
+   8,
+   32
+  ],
+  "shapes": [
+   3,
+   2
+  ],
+  "start": [
+   3
+  ],
+  "loc": [
+   1,
+   21168,
+   8,
+   3,
+   4,
+   2
+  ],
+  "attn": [
+   1,
+   21168,
+   8,
+   3,
+   4
+  ]
+ },
+ "builtin/fp32": {
+  "rel": 0.0,
+  "max_abs": 0.0,
+  "bit_exact": true,
+  "ms": 1.1315200328826904,
+  "plugin_precision": {
+   "Float -> Float": 1
+  }
+ },
+ "builtin/fp16": {
+  "rel": 0.0,
+  "max_abs": 0.0,
+  "bit_exact": true,
+  "ms": 1.1315200328826904,
+  "plugin_precision": {
+   "Float -> Float": 1
+  }
+ },
+ "builtin/fp16io": {
+  "rel": 0.010376551188528538,
+  "max_abs": 0.20156419277191162,
+  "bit_exact": false,
+  "ms": 1.4950400590896606,
+  "plugin_precision": {
+   "Half -> Half": 1
+  }
+ },
+ "upstream/fp32": {
+  "rel": 0.0,
+  "max_abs": 0.0,
+  "bit_exact": true,
+  "ms": 1.282047986984253,
+  "plugin_precision": {
+   "Float -> Float": 1
+  }
+ },
+ "upstream/fp16": {
+  "rel": 0.0,
+  "max_abs": 0.0,
+  "bit_exact": true,
+  "ms": 1.282047986984253,
+  "plugin_precision": {
+   "Float -> Float": 1
+  }
+ },
+ "upstream/fp16io": {
+  "rel": 0.006618695333600044,
+  "max_abs": 0.12705722451210022,
+  "bit_exact": false,
+  "ms": 1.8187040090560913,
+  "plugin_precision": {
+   "Float -> Float": 1
+  }
+ },
+ "torch_ms": 1.3578239679336548
+}

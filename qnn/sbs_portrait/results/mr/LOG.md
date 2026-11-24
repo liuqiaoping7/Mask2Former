@@ -15,6 +15,7 @@
 | `batch/batch_spike.json` | 所有尺寸双眼 batch=2 vs 两次 batch=1 | 全部更慢（+3.3%～+11%），激活显存 ×2～2.5；4060 上单眼已占满 24 个 SM |
 | `pip/pip_spike.json`、`pip/crop_*.png`、`pip/icon_3d_sbs.png` | 合成 + 画中画的 6 种实现，10 种分辨率 | Triton（合成 kernel + 画中画 kernel）最快且逐位一致：1080p 0.24 ms（torch 3.89 ms）；纹理采样对 RGBA 图标省一半取样时间，对 3 通道帧要先转 RGBA，整体更慢 |
 | `pip/e2e/` | 端到端：合成实现 × 画中画来源 | 画中画几乎零开销；Triton 合成每帧省 1～3 ms |
+| `msda_plugin/` | 内置 MSDA 插件 vs 包装工程自带 CUDA kernel 的 IPluginV3 插件：单算子、整个 pixel decoder（3 种尺寸 × FP32 / FP16）、1080p 端到端 | FP32 下两者与上游 kernel 逐位一致；FP16 engine 中上游插件保持 FP32，pixel decoder 误差低 10%～18%（0.37% → 0.33%），端到端无差别（alpha 对 baseline 2.55e-4 vs 2.54e-4），每帧慢 8.7 ms；仅作对照 |
 | `final_1080p/` | 1080p 单分辨率最终配置 | 150.0 ms/帧（第二轮 152.0），显存峰值 1458 MB（1684），RSS 2470 MB |
 
 回退 / 未采用：单一宽 profile（慢）、把画中画融合进整帧 kernel（负载不均，慢一倍多）、执行上下文在加载时全部创建（RSS +2 GB）、几何并行用"主线程等待时间"做判据（异步执行下误判）、batch=2（全部尺寸更慢）。

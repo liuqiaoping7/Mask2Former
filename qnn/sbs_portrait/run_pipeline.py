@@ -164,6 +164,7 @@ def main():
     ap.add_argument("--size-policy", default="official", choices=("official", "native", "aligned"))
     ap.add_argument("--pip", default="", help="picture-in-picture: frame | icon | <SBS RGBA png>")
     ap.add_argument("--compose-kernel", default="triton", help="pip_compose.KINDS")
+    ap.add_argument("--msda-plugin", default="builtin", choices=("builtin", "upstream"))
     ap.add_argument("--profiles", default="exact", help="trt_common.PROFILE_SETS name")
     args = ap.parse_args()
     files = sorted(glob(os.path.join(args.frames, "*.jpg")))[: args.max_frames]
@@ -175,7 +176,7 @@ def main():
     timer = Timer(sync=args.profile)
     pipe = SBSPortraitPipeline(cv2.imread(files[0]), cv2.imread(args.bg), timer=timer, mode=args.mode,
                                size_policy=args.size_policy, profiles=args.profiles, pip=pip_source(args.pip),
-                               compose_kernel=args.compose_kernel)
+                               compose_kernel=args.compose_kernel, msda_plugin=args.msda_plugin)
     init_s = time.perf_counter() - t_init
     stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip)
     mon.stop()

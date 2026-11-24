@@ -45,6 +45,19 @@ class _MSDATRT(torch.autograd.Function):
         return g.op("Reshape", out, g.op("Constant", value_t=torch.tensor([0, 0, -1], dtype=torch.int64)))
 
 
+class _MSDAUpstreamTRT(_MSDATRT):
+    """Same, emitting the plugin that wraps the project's own CUDA kernel (trt_msda_plugin.py):
+    INT64 shapes / level starts as the kernel takes them, output already (N, Lq, M*D)."""
+
+    @staticmethod
+    def symbolic(g, value, shapes, start, loc, attn, im2col_step):
+        return g.op("MSDeformAttnUpstream_TRT", value, shapes, start, loc, attn)
+
+
+MSDA_OPS = {"builtin": (_MSDATRT, "MultiscaleDeformableAttnPlugin_TRT"),
+            "upstream": (_MSDAUpstreamTRT, "MSDeformAttnUpstream_TRT")}
+
+
 class _Wrap(torch.nn.Module):
     def __init__(self, pd):
         super().__init__()
@@ -66,21 +79,27 @@ def stage_shapes(chans):
 
 
 def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trace_hw=(800, 1088),
-                 workspace_gb=2, batch=1, log=print):
+                 workspace_gb=2, batch=1, msda="builtin", detailed=False, log=print):
     """profiles: model-input (min, opt, max) HxW list; chans: backbone channels per level.
     Writes `plan` (timing cache next to it).
 
     fp32_layers (with fp16): layer groups pinned to FP32 -- "sampling": everything that
     produces the MSDA sampling locations / attention weights and the plugin itself (in FP16 a
     normalised location in [0, 1] is only good to ~1e-3, i.e. ~0.2 px on the 168-wide level);
-    "norm": LayerNorm / GroupNorm."""
+    "norm": LayerNorm / GroupNorm.
+    msda: "builtin" -- TensorRT's MultiscaleDeformableAttnPlugin_TRT (FP32 / FP16); "upstream" -- the
+    plugin wrapping this project's MSDeformAttn CUDA kernel (FP32 only, trt_msda_plugin.py)."""
     from mask2former.modeling.pixel_decoder.ops.modules import ms_deform_attn as msda_mod
 
     chans = chans or {"res2": 192, "res3": 384, "res4": 768, "res5": 1536}
     shapes = stage_shapes(chans)
     onnx_path = os.path.splitext(plan)[0] + ".onnx"
     saved = msda_mod.MSDeformAttnFunction
-    msda_mod.MSDeformAttnFunction = _MSDATRT
+    fn, op_name = MSDA_OPS[msda]
+    if msda == "upstream":
+        import trt_msda_plugin
+        trt_msda_plugin.load()  # registered before the ONNX parser looks the op up
+    msda_mod.MSDeformAttnFunction = fn
     axes = {k: {2: f"h{k}", 3: f"w{k}"} for k in IN}
     axes.update({"mask_features": {2: "h4", 3: "w4"}, "ms0": {1: "h32", 2: "w32"}, "ms1": {1: "h16", 2: "w16"},
                  "ms2": {1: "h8", 2: "w8"}})
@@ -92,7 +111,7 @@ def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trac
     finally:
         msda_mod.MSDeformAttnFunction = saved
     ops = [n.op_type for n in onnx.load(onnx_path, load_external_data=False).graph.node]
-    n_plugin = ops.count("MultiscaleDeformableAttnPlugin_TRT")
+    n_plugin = ops.count(op_name)
     if n_plugin == 0:  # upstream catches the export error and falls back to the PyTorch core
         raise RuntimeError("MSDA was not exported as the TensorRT plugin")
 
@@ -106,9 +125,9 @@ def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trac
     # FP16 outputs: what the FP16 transformer decoder consumes
     tc.build(onnx_path, plan, profiles, shapes, fp16=fp16, plugins=True, configure=configure,
              out_dtypes={k: trt.float16 for k in OUT} if fp16 else None, workspace_gb=workspace_gb, batch=batch,
-             log=log)
+             detailed=detailed, log=log)
     os.remove(onnx_path)
-    log(f"[trt] {n_plugin} MSDA plugin nodes")
+    log(f"[trt] {n_plugin} MSDA plugin nodes ({op_name})")
 
 
 def _pin_fp32(net, groups):
@@ -149,7 +168,10 @@ def _pin_fp32(net, groups):
 class TRTPixelDecoder(tc.TRTRunner):
     """Outputs are reused buffers (consume them before the next call with the same shapes)."""
 
-    def __init__(self, plan):
+    def __init__(self, plan, msda="builtin"):
+        if msda == "upstream":
+            import trt_msda_plugin
+            trt_msda_plugin.load()  # the plan references the plugin: register it before deserializing
         super().__init__(plan, plugins=True)
 
     def __call__(self, feats):

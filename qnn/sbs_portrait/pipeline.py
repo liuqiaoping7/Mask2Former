@@ -95,7 +95,7 @@ class SBSPortraitPipeline:
     def __init__(self, first_frame, bg_sbs, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS,
                  work_pixels=WORK_PIXELS, soft=(0.4, 0.6), gf_eps=1e-4, lam=0.7, gate=0.5, bg_margin=4.0,
                  mode="opt", seg=None, size_policy="official", profiles="exact", geo_threads=4,
-                 pip=None, compose_kernel="triton", geo_late_ms=5.0, timer=None):
+                 pip=None, compose_kernel="triton", geo_late_ms=5.0, msda_plugin="builtin", timer=None):
         """mode: "opt" -- the optimized pipeline (TensorRT engines with dynamic-shape profiles,
         GPU pre / post-processing, CPU geometry overlapped in a worker thread); "ref" -- the
         reference: PyTorch FP32 model, torch person post-processing, CPU (OpenCV / numpy)
@@ -118,7 +118,8 @@ class SBSPortraitPipeline:
         pip: picture-in-picture in the top-right corner of each eye, (H/8, W/8): None, "frame" (the
         local SBS input frame) or an SBS RGBA image (numpy (h, 2w, 4) u8, e.g. a 3D icon); placed at
         the person's disparity plus the background margin, so it is never behind the person.
-        compose_kernel: compositing (+ PiP) implementation, see pip_compose.KINDS."""
+        compose_kernel: compositing (+ PiP) implementation, see pip_compose.KINDS.
+        msda_plugin: MSDA plugin of the pixel-decoder engine, "builtin" or "upstream" (see seg.py)."""
         self.timer = timer or Timer()
         assert mode in ("opt", "ref")
         post, overlap = ("gpu", True) if mode == "opt" else ("cpu", False)
@@ -133,7 +134,8 @@ class SBSPortraitPipeline:
         if seg is None:
             if mode == "opt":
                 seg = PersonSegmenter(config_file, weights, precision="fp16", backbone="trt", fast_decoder=True,
-                                      pixel_decoder="trt", decoder="trt", profiles=profiles, size_policy=size_policy)
+                                      pixel_decoder="trt", decoder="trt", profiles=profiles, size_policy=size_policy,
+                                      msda_plugin=msda_plugin)
             else:
                 seg = PersonSegmenter(config_file, weights, precision="fp32", fused=False, size_policy=size_policy)
         self.seg = seg
