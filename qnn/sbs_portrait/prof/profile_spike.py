@@ -23,7 +23,7 @@ from detectron2.structures import ImageList  # noqa: E402
 from pipeline import split_sbs  # noqa: E402
 from seg import REPO, PersonSegmenter  # noqa: E402
 
-SIZES = [(768, 1344), (800, 1344), (800, 1184), (800, 1088), (736, 1280), (544, 960), (512, 704), (480, 864), (480, 640)]
+SIZES = [(768, 1344), (800, 1344), (800, 1184), (800, 1088), (768, 1152), (736, 1280), (544, 960), (512, 704), (480, 864), (480, 640)]
 
 
 def load(set_name):

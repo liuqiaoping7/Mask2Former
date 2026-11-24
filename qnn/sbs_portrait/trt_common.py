@@ -6,8 +6,8 @@ profile for its `opt` shape, so a narrow profile around a frequent size (the 108
 min = opt = max) runs like the former static engine while wider profiles cover the rest.
 
 Profile sets (PROFILE_SETS): "exact" (default) -- one min = opt = max profile per discrete input
-of the official size policy (768x1344 for 16:9, 800 x 1088..1344 for 4:3 .. 5:3) plus ranged
-buckets for anything else ("official" 768..800 x 1088..1344, "small"
+of the official / aligned size policies (768x1344 for 16:9, 800 x 1088..1344 for 4:3 .. 5:3,
+768x1152) plus ranged buckets for anything else ("official" 768..800 x 1088..1344, "small"
 480..608 lines, "mid" 608..800 lines; native policy); "multires" -- p1080 + the three ranged
 buckets; "wide" -- a single profile 480x640 .. 800x1344 (comparison only).
 Measured per eye (prof/profile_spike.py): exact profiles are as fast as the former static engine
@@ -55,7 +55,8 @@ PROFILES["wide"] = ((480, 640), (704, 1216), (800, 1344))  # one profile for eve
 # shortest edge 800 -> 800 x 1067..1333, padded 800 x 1088..1344; wider eyes -> 768 x 1344 (p1080)
 for _w in range(1088, 1344 + 1, 32):
     PROFILES[f"o800x{_w}"] = ((800, _w),) * 3
-PROFILE_SETS["exact"] = ("p1080", *(f"o800x{w}" for w in range(1088, 1344 + 1, 32)), "official", "small", "mid")
+PROFILES["a768x1152"] = ((768, 1152),) * 3  # size_policy "aligned": 4:3 .. 3:2 eyes
+PROFILE_SETS["exact"] = ("p1080", *(f"o800x{w}" for w in range(1088, 1344 + 1, 32)), "a768x1152", "official", "small", "mid")
 
 
 def profile_list(name_or_list):

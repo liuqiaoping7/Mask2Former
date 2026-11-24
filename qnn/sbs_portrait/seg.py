@@ -40,7 +40,11 @@ class PersonSegmenter:
         size whose model input falls inside them works. With "trt" only person() is available.
         size_policy: model-input size for an eye of h x w -- "official": shortest edge 800,
         longest <= 1333 (detectron2 test resize, upsamples small eyes); "native": shortest edge
-        min(h, w, 800) (small eyes are not upsampled: VGA runs at 480x640, ~2.7x less work).
+        min(h, w, 800) (small eyes are not upsampled: VGA runs at 480x640, ~2.7x less work);
+        "aligned": the official size with each side snapped to a multiple of 192 when that is
+        within +-10% and the padded side is not one already (Swin pads every stage to its 12-token
+        windows; stage 3 = 18 of the 24 blocks at 1/16 scale, so a side of 800 -> 50 tokens runs
+        as 60, +20% work; 768 -> 48 needs none). Non-uniform resize, mapped back exactly by person().
         eye_hw / trt_plan: ignored (static engines of the 1080p-only version).
         fused: person() post-processing with the fused Triton kernel (person_triton.py) instead
         of the grid_sample / matmul / argmax torch ops.
@@ -69,7 +73,7 @@ class PersonSegmenter:
         self.cfg = cfg
         self.model = build_model(cfg).eval()
         DetectionCheckpointer(self.model).load(weights)
-        assert size_policy in ("official", "native")
+        assert size_policy in ("official", "native", "aligned")
         self.size_policy = size_policy
         self.aug = T.ResizeShortestEdge([cfg.INPUT.MIN_SIZE_TEST] * 2, cfg.INPUT.MAX_SIZE_TEST)  # official (prof/ scripts)
         self.fmt = cfg.INPUT.FORMAT
@@ -146,7 +150,10 @@ class PersonSegmenter:
         short, long_ = self.cfg.INPUT.MIN_SIZE_TEST, self.cfg.INPUT.MAX_SIZE_TEST
         if self.size_policy == "native":
             short = min(short, h, w)
-        return T.ResizeShortestEdge.get_output_shape(h, w, short, long_)
+        nh, nw = T.ResizeShortestEdge.get_output_shape(h, w, short, long_)
+        if self.size_policy == "aligned":
+            nh, nw = _snap(nh), _snap(nw)
+        return nh, nw
 
     def preprocess(self, im):
         """BGR HxWx3 uint8 -> model input CHW uint8 tensor (shortest edge = MIN_SIZE_TEST).
@@ -360,6 +367,15 @@ def _area_taps(src, dst):
             t.append((s2, min(min(f2 - s2, 1.0), cw) / cw))
         taps.append(([i for i, _ in t], [float(np.float32(a)) for _, a in t]))
     return taps
+
+
+def _snap(n, unit=192, tol=0.1, div=32):
+    """Snap a model-input side to a multiple of `unit` (Swin stage-3 window alignment) when the
+    padded side is not aligned already and the change is within tol."""
+    if (-(-n // div) * div) % unit == 0:
+        return n
+    a = max(unit, int(round(n / unit)) * unit)
+    return a if abs(a / n - 1) <= tol else n
 
 
 def _linear_area_taps(src, dst):
