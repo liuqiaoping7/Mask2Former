@@ -66,7 +66,7 @@ def stage_shapes(chans):
 
 
 def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trace_hw=(800, 1088),
-                 workspace_gb=2, log=print):
+                 workspace_gb=2, batch=1, log=print):
     """profiles: model-input (min, opt, max) HxW list; chans: backbone channels per level.
     Writes `plan` (timing cache next to it).
 
@@ -86,7 +86,7 @@ def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trac
                  "ms2": {1: "h8", 2: "w8"}})
     try:
         with torch.no_grad():
-            args = tuple(torch.randn(*shapes(*trace_hw)[k], device="cuda") for k in IN)
+            args = tuple(torch.randn(*tc.with_batch(shapes(*trace_hw), batch)[k], device="cuda") for k in IN)
             torch.onnx.export(_Wrap(pd).eval(), args, onnx_path, opset_version=17, input_names=list(IN),
                               output_names=list(OUT), dynamic_axes=axes, dynamo=False)
     finally:
@@ -105,7 +105,8 @@ def build_engine(pd, plan, profiles, chans=None, fp16=True, fp32_layers=(), trac
 
     # FP16 outputs: what the FP16 transformer decoder consumes
     tc.build(onnx_path, plan, profiles, shapes, fp16=fp16, plugins=True, configure=configure,
-             out_dtypes={k: trt.float16 for k in OUT} if fp16 else None, workspace_gb=workspace_gb, log=log)
+             out_dtypes={k: trt.float16 for k in OUT} if fp16 else None, workspace_gb=workspace_gb, batch=batch,
+             log=log)
     os.remove(onnx_path)
     log(f"[trt] {n_plugin} MSDA plugin nodes")
 

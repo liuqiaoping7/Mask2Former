@@ -29,7 +29,7 @@ class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
                  backbone="torch", eye_hw=None, trt_plan=None, fused=True, fast_decoder=False,
                  compile_decoders=False, pixel_decoder="torch", decoder="torch", profiles="exact",
-                 size_policy="official"):
+                 size_policy="official", batch=1):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
@@ -45,6 +45,7 @@ class PersonSegmenter:
         within +-10% and the padded side is not one already (Swin pads every stage to its 12-token
         windows; stage 3 = 18 of the 24 blocks at 1/16 scale, so a side of 800 -> 50 tokens runs
         as 60, +20% work; 768 -> 48 needs none). Non-uniform resize, mapped back exactly by person().
+        batch: engine batch size (2 = both eyes in one call: person() then takes both eyes).
         eye_hw / trt_plan: ignored (static engines of the 1080p-only version).
         fused: person() post-processing with the fused Triton kernel (person_triton.py) instead
         of the grid_sample / matmul / argmax torch ops.
@@ -107,9 +108,9 @@ class PersonSegmenter:
                 head.predictor.forward = torch.compile(head.predictor.forward, **opts)
         self.trt = self.trt_pd = self.trt_td = None
         if backbone == "trt":
-            self._load_engines(profiles, pixel_decoder, decoder, fast_decoder)
+            self._load_engines(profiles, pixel_decoder, decoder, fast_decoder, batch)
 
-    def _load_engines(self, profiles, pixel_decoder, decoder, fast_decoder):
+    def _load_engines(self, profiles, pixel_decoder, decoder, fast_decoder, batch=1):
         """Build (first use) and load the dynamic-shape engines; releases the torch weights."""
         import trt_common as tc
         from trt_backbone import TRTBackbone
@@ -117,13 +118,13 @@ class PersonSegmenter:
 
         prof = tc.profile_list(profiles)
         tag = profiles if isinstance(profiles, str) else "custom"
-        tag = f"{tag}_{tc.plan_tag(prof)}"
+        tag = f"{tag}_{tc.plan_tag(prof)}" + (f"_b{batch}" if batch > 1 else "")
         wdir = os.path.join(REPO, "weights")
         head = self.model.sem_seg_head
         chans = {k: v.channels for k, v in self.model.backbone.output_shape().items()}
         plan = os.path.join(wdir, f"swinl_backbone_fp16_{tag}.plan")
         if not os.path.exists(plan):
-            build_bb(self.model.backbone, plan, prof)
+            build_bb(self.model.backbone, plan, prof, batch=batch)
         self.trt = TRTBackbone(plan)
         self.model.backbone.to("meta")  # release the torch backbone weights
         if pixel_decoder == "trt":
@@ -131,7 +132,7 @@ class PersonSegmenter:
             from trt_pixel_decoder import build_engine as build_pd
             pd_plan = os.path.join(wdir, f"pixel_decoder_fp16_{tag}.plan")
             if not os.path.exists(pd_plan):
-                build_pd(head.pixel_decoder, pd_plan, prof, chans=chans)
+                build_pd(head.pixel_decoder, pd_plan, prof, chans=chans, batch=batch)
             self.trt_pd = TRTPixelDecoder(pd_plan)
             head.pixel_decoder.to("meta")
             if decoder == "trt":
@@ -140,7 +141,7 @@ class PersonSegmenter:
                 from trt_decoder import build_engine as build_td
                 td_plan = os.path.join(wdir, f"decoder_fp16_{tag}.plan")
                 if not os.path.exists(td_plan):
-                    build_td(head.predictor, td_plan, prof)
+                    build_td(head.predictor, td_plan, prof, batch=batch)
                 self.trt_td = TRTDecoder(td_plan)
                 head.predictor.to("meta")
         torch.cuda.empty_cache()

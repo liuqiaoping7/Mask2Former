@@ -140,7 +140,7 @@ def pixel_decoder_forward(pd, feats, pe=None):
         ry, rx = torch.meshgrid((torch.arange(h, device=src_flat.device, dtype=torch.float32) + 0.5) / h,
                                 (torch.arange(w, device=src_flat.device, dtype=torch.float32) + 0.5) / w, indexing="ij")
         refs.append(torch.stack((rx.reshape(-1), ry.reshape(-1)), -1))
-    ref = torch.cat(refs, 0)[None, :, None, :].expand(1, -1, nl, -1)
+    ref = torch.cat(refs, 0)[None, :, None, :].expand(src_flat.shape[0], -1, nl, -1)
     y = src_flat
     for layer in tr.encoder.layers:
         y = layer(y, pos_flat, ref, shapes, start, None)
@@ -158,10 +158,10 @@ def pixel_decoder_forward(pd, feats, pe=None):
 
 
 # ---------------------------------------------------------------- transformer decoder
-def decoder_forward(self, x, mask_features, pe=None, mask_fill=None):
+def decoder_forward(self, x, mask_features, pe=None, mask_fill=None, batch1=True):
     """seg._decoder_inference_forward with the per-size cache keyed by level (the traced size
     tuples are new objects at every call) and an optional position-embedding module / finite
-    additive mask fill (TensorRT export)."""
+    additive mask fill (TensorRT export); batch1=False: per-head masks for batch > 1."""
     pe = pe or self.pe_layer
     src, pos, sizes = [], [], []
     for i in range(self.num_feature_levels):
@@ -181,7 +181,9 @@ def decoder_forward(self, x, mask_features, pe=None, mask_fill=None):
         m = m & ~m.all(-1, keepdim=True)
         if mask_fill is not None:
             m = torch.zeros(m.shape, dtype=emb.dtype, device=m.device).masked_fill(m, mask_fill)
-        return m[0]  # batch 1: a 2-D mask broadcasts over the heads
+        if batch1:
+            return m[0]  # batch 1: a 2-D mask broadcasts over the heads
+        return m.unsqueeze(1).expand(-1, self.num_heads, -1, -1).flatten(0, 1)
 
     attn_mask = attn_mask_for(output, 0)
     for i in range(self.num_layers):

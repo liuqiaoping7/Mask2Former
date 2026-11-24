@@ -59,6 +59,11 @@ PROFILES["a768x1152"] = ((768, 1152),) * 3  # size_policy "aligned": 4:3 .. 3:2 
 PROFILE_SETS["exact"] = ("p1080", *(f"o800x{w}" for w in range(1088, 1344 + 1, 32)), "a768x1152", "official", "small", "mid")
 
 
+def with_batch(shapes, b):
+    """Replace the leading (batch) dimension of every shape (engines are built for a fixed batch)."""
+    return {k: (b, *v[1:]) for k, v in shapes.items()}
+
+
 def profile_list(name_or_list):
     if isinstance(name_or_list, str):
         return [PROFILES[p] for p in PROFILE_SETS[name_or_list]]
@@ -73,7 +78,7 @@ def plan_tag(profiles):
 
 
 def build(onnx_path, plan, profiles, stage_shapes, fp16=True, in_dtypes=None, out_dtypes=None,
-          configure=None, workspace_gb=2, plugins=False, log=print):
+          configure=None, workspace_gb=2, plugins=False, batch=1, log=print):
     """Parse onnx_path and build plan with one optimization profile per entry of `profiles`
     (model-input (min, opt, max) HxW); stage_shapes(H, W) -> {input name: shape}.
     configure(net, cfg): extra network / config edits (precision pins)."""
@@ -105,7 +110,7 @@ def build(onnx_path, plan, profiles, stage_shapes, fp16=True, in_dtypes=None, ou
         configure(net, cfg)
     for lo, opt, hi in profiles:
         p = builder.create_optimization_profile()
-        s_lo, s_opt, s_hi = stage_shapes(*lo), stage_shapes(*opt), stage_shapes(*hi)
+        s_lo, s_opt, s_hi = (with_batch(stage_shapes(*x), batch) for x in (lo, opt, hi))
         for name in s_lo:
             p.set_shape(name, s_lo[name], s_opt[name], s_hi[name])
         cfg.add_optimization_profile(p)
