@@ -27,14 +27,21 @@ DEFAULT_WEIGHTS = os.path.join(REPO, "weights/model_final_f07440.pkl")
 
 class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
-                 backbone="torch", eye_hw=(1080, 1920), trt_plan=None, fused=True, fast_decoder=False,
-                 compile_decoders=False, pixel_decoder="torch", decoder="torch"):
+                 backbone="torch", eye_hw=None, trt_plan=None, fused=True, fast_decoder=False,
+                 compile_decoders=False, pixel_decoder="torch", decoder="torch", profiles="multires",
+                 size_policy="official"):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
-        backbone: "torch" or "trt" -- static-shape TensorRT FP16 engine for the backbone, used by
-        person() (built on first use for eyes of size eye_hw; the torch backbone weights are
-        then released). With "trt" only person() is available.
+        backbone: "torch" or "trt" -- TensorRT FP16 engine for the backbone, used by person()
+        (built on first use, the torch backbone weights are then released). The engines have
+        dynamic input sizes with one optimization profile per entry of `profiles`
+        (trt_common.PROFILE_SETS name or a list of model-input (min, opt, max) HxW), so any eye
+        size whose model input falls inside them works. With "trt" only person() is available.
+        size_policy: model-input size for an eye of h x w -- "official": shortest edge 800,
+        longest <= 1333 (detectron2 test resize, upsamples small eyes); "native": shortest edge
+        min(h, w, 800) (small eyes are not upsampled: VGA runs at 480x640, ~2.7x less work).
+        eye_hw / trt_plan: ignored (static engines of the 1080p-only version).
         fused: person() post-processing with the fused Triton kernel (person_triton.py) instead
         of the grid_sample / matmul / argmax torch ops.
         fast_decoder: inference-only transformer-decoder forward without redundant work
@@ -62,7 +69,9 @@ class PersonSegmenter:
         self.cfg = cfg
         self.model = build_model(cfg).eval()
         DetectionCheckpointer(self.model).load(weights)
-        self.aug = T.ResizeShortestEdge([cfg.INPUT.MIN_SIZE_TEST] * 2, cfg.INPUT.MAX_SIZE_TEST)
+        assert size_policy in ("official", "native")
+        self.size_policy = size_policy
+        self.aug = T.ResizeShortestEdge([cfg.INPUT.MIN_SIZE_TEST] * 2, cfg.INPUT.MAX_SIZE_TEST)  # official (prof/ scripts)
         self.fmt = cfg.INPUT.FORMAT
         assert precision in ("fp32", "fp16")
         self.fp16 = precision == "fp16"
@@ -94,66 +103,81 @@ class PersonSegmenter:
                 head.predictor.forward = torch.compile(head.predictor.forward, **opts)
         self.trt = self.trt_pd = self.trt_td = None
         if backbone == "trt":
-            from trt_backbone import TRTBackbone, build_engine
-            nh, nw = T.ResizeShortestEdge.get_output_shape(eye_hw[0], eye_hw[1], cfg.INPUT.MIN_SIZE_TEST,
-                                                           cfg.INPUT.MAX_SIZE_TEST)
-            d = self.model.size_divisibility
-            shape = (1, 3, -(-nh // d) * d, -(-nw // d) * d)
-            plan = trt_plan or os.path.join(REPO, "weights", f"swinl_backbone_fp16_{shape[2]}x{shape[3]}.plan")
-            if not os.path.exists(plan):
-                build_engine(self.model.backbone, plan, shape)
-            self.trt = TRTBackbone(plan)
-            self.model.backbone.to("meta")  # release the torch backbone weights
-            if pixel_decoder == "trt":
-                from trt_pixel_decoder import TRTPixelDecoder
-                from trt_pixel_decoder import build_engine as build_pd
-                pd_plan = os.path.join(REPO, "weights", f"pixel_decoder_fp16_{shape[2]}x{shape[3]}.plan")
-                if not os.path.exists(pd_plan):
-                    build_pd(self.model.sem_seg_head.pixel_decoder,
-                             {k: tuple(v.shape) for k, v in self.trt.out.items()}, pd_plan)
-                self.trt_pd = TRTPixelDecoder(pd_plan)
-                self.model.sem_seg_head.pixel_decoder.to("meta")
-                if decoder == "trt":
-                    assert fast_decoder, "the decoder engine is exported from the inference forward"
-                    from trt_decoder import TRTDecoder
-                    from trt_decoder import build_engine as build_td
-                    td_plan = os.path.join(REPO, "weights", f"decoder_fp16_{shape[2]}x{shape[3]}.plan")
-                    if not os.path.exists(td_plan):
-                        o = self.trt_pd.out
-                        nchw = lambda s: (s[0], s[3], s[1], s[2])  # noqa: E731  (engine outputs are NHWC)
-                        build_td(self.model.sem_seg_head.predictor, [nchw(tuple(o[k].shape)) for k in ("ms0", "ms1", "ms2")],
-                                 tuple(o["mask_features"].shape), td_plan)
-                    self.trt_td = TRTDecoder(td_plan)
-                    self.model.sem_seg_head.predictor.to("meta")
-            torch.cuda.empty_cache()
+            self._load_engines(profiles, pixel_decoder, decoder, fast_decoder)
+
+    def _load_engines(self, profiles, pixel_decoder, decoder, fast_decoder):
+        """Build (first use) and load the dynamic-shape engines; releases the torch weights."""
+        import trt_common as tc
+        from trt_backbone import TRTBackbone
+        from trt_backbone import build_engine as build_bb
+
+        prof = tc.profile_list(profiles)
+        tag = profiles if isinstance(profiles, str) else "custom"
+        tag = f"{tag}_{tc.plan_tag(prof)}"
+        wdir = os.path.join(REPO, "weights")
+        head = self.model.sem_seg_head
+        chans = {k: v.channels for k, v in self.model.backbone.output_shape().items()}
+        plan = os.path.join(wdir, f"swinl_backbone_fp16_{tag}.plan")
+        if not os.path.exists(plan):
+            build_bb(self.model.backbone, plan, prof)
+        self.trt = TRTBackbone(plan)
+        self.model.backbone.to("meta")  # release the torch backbone weights
+        if pixel_decoder == "trt":
+            from trt_pixel_decoder import TRTPixelDecoder
+            from trt_pixel_decoder import build_engine as build_pd
+            pd_plan = os.path.join(wdir, f"pixel_decoder_fp16_{tag}.plan")
+            if not os.path.exists(pd_plan):
+                build_pd(head.pixel_decoder, pd_plan, prof, chans=chans)
+            self.trt_pd = TRTPixelDecoder(pd_plan)
+            head.pixel_decoder.to("meta")
+            if decoder == "trt":
+                assert fast_decoder, "the decoder engine is exported from the inference forward"
+                from trt_decoder import TRTDecoder
+                from trt_decoder import build_engine as build_td
+                td_plan = os.path.join(wdir, f"decoder_fp16_{tag}.plan")
+                if not os.path.exists(td_plan):
+                    build_td(head.predictor, td_plan, prof)
+                self.trt_td = TRTDecoder(td_plan)
+                head.predictor.to("meta")
+        torch.cuda.empty_cache()
+
+    def input_hw(self, h, w):
+        """Model-input size (before padding to size_divisibility) for an h x w eye."""
+        short, long_ = self.cfg.INPUT.MIN_SIZE_TEST, self.cfg.INPUT.MAX_SIZE_TEST
+        if self.size_policy == "native":
+            short = min(short, h, w)
+        return T.ResizeShortestEdge.get_output_shape(h, w, short, long_)
 
     def preprocess(self, im):
         """BGR HxWx3 uint8 -> model input CHW uint8 tensor (shortest edge = MIN_SIZE_TEST).
 
-        Same output size as detectron2's ResizeShortestEdge, but resized with OpenCV
-        INTER_AREA instead of PIL BILINEAR (closest match to PIL's antialiased downscale:
-        mean |diff| ~0.28 gray level, ~7x faster).
+        Same output size as detectron2's ResizeShortestEdge (size_policy "official"), but resized
+        with OpenCV INTER_AREA instead of PIL BILINEAR (closest match to PIL's antialiased
+        downscale: mean |diff| ~0.28 gray level, ~7x faster; when upsampling, OpenCV's INTER_AREA
+        is bilinear).
         """
         h, w = im.shape[:2]
-        nh, nw = T.ResizeShortestEdge.get_output_shape(h, w, self.cfg.INPUT.MIN_SIZE_TEST, self.cfg.INPUT.MAX_SIZE_TEST)
-        x = cv2.resize(im, (nw, nh), interpolation=cv2.INTER_AREA)
+        nh, nw = self.input_hw(h, w)
+        x = cv2.resize(im, (nw, nh), interpolation=cv2.INTER_AREA) if (nh, nw) != (h, w) else im
         if self.fmt == "RGB":
             x = x[:, :, ::-1]
         return torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)))
 
     def preprocess_gpu(self, eye):
         """GPU version of preprocess() for an eye already on the GPU (HxWx3 uint8 BGR view of
-        the uploaded SBS frame): OpenCV INTER_AREA resize with OpenCV's own area weights
-        (computeResizeAreaTab, horizontal then vertical like cv::resizeArea, cvRound), BGR->RGB
-        and the model normalisation, fused in one Triton kernel (area_triton.py). Returns the
-        normalised float CHW input; runs on the current stream."""
+        the uploaded SBS frame): OpenCV INTER_AREA resize with OpenCV's own weights
+        (computeResizeAreaTab when downscaling; when upscaling OpenCV's INTER_AREA is bilinear
+        with "area mode" coefficients in 11-bit fixed point, _linear_area_taps), horizontal then
+        vertical, cvRound, BGR->RGB and the model normalisation, fused in one Triton kernel
+        (area_triton.py). Returns the normalised float CHW input; runs on the current stream."""
         from area_triton import area_resize_normalize
 
         h, w = eye.shape[:2]
-        nh, nw = T.ResizeShortestEdge.get_output_shape(h, w, self.cfg.INPUT.MIN_SIZE_TEST, self.cfg.INPUT.MAX_SIZE_TEST)
+        nh, nw = self.input_hw(h, w)
         key = (h, w, nh, nw)
         if key not in self._area:
-            tx, ty = _area_taps(w, nw), _area_taps(h, nh)
+            taps = _area_taps if nh <= h and nw <= w else _linear_area_taps  # cv::resize's dispatch
+            tx, ty = taps(w, nw), taps(h, nh)
             k = max(len(t[0]) for t in tx + ty)
             pad = lambda taps: (torch.tensor([i + [i[-1]] * (k - len(i)) for i, _ in taps], dtype=torch.int32, device=eye.device),  # noqa: E731
                                 torch.tensor([a + [0.0] * (k - len(a)) for _, a in taps], dtype=torch.float32, device=eye.device))
@@ -335,6 +359,27 @@ def _area_taps(src, dst):
         if f2 - s2 > 1e-3:
             t.append((s2, min(min(f2 - s2, 1.0), cw) / cw))
         taps.append(([i for i, _ in t], [float(np.float32(a)) for _, a in t]))
+    return taps
+
+
+def _linear_area_taps(src, dst):
+    """cv::resize INTER_AREA when upscaling (it is not a downscale in both axes): bilinear with
+    area-mode coefficients, sx = floor(dx * scale), fx = (dx + 1) - (sx + 1) / scale, fx <= 0 -> 0
+    else frac(fx); borders clamp; coefficients rounded to 11-bit fixed point (uint8 path)."""
+    inv = dst / src
+    scale = 1.0 / inv
+    taps = []
+    for d in range(dst):
+        sx = math.floor(d * scale)
+        fx = np.float32((d + 1) - (sx + 1) * inv)
+        fx = np.float32(0.0) if fx <= 0 else np.float32(fx - math.floor(fx))
+        if sx < 0:
+            sx, fx = 0, np.float32(0.0)
+        if sx >= src - 1:
+            sx, fx = src - 1, np.float32(0.0)
+        c0 = int(np.rint(np.float32(1.0 - fx) * 2048))
+        c1 = int(np.rint(fx * 2048))
+        taps.append(([sx, min(sx + 1, src - 1)], [c0 / 2048.0, c1 / 2048.0]))
     return taps
 
 

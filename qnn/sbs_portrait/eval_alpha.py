@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 
 import temporal_stereo as ts
+from pipeline import work_size
 
 
 def load(run, t):
@@ -42,7 +43,8 @@ def main():
 
     f0 = cv2.imread(files[0])
     W = f0.shape[1] // 2
-    ws = (W // 2, f0.shape[0] // 2)
+    ws, _ = work_size(W, f0.shape[0])  # same work grid as the pipeline (half of a 1080p eye)
+    bw = max(1, int(round(10 * ws[1] / 540.0)))  # boundary band half width: 10 px at 540 lines
     g = lambda x: cv2.cvtColor(cv2.resize(x, ws, interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
     min_d, num_d, _, _ = ts.estimate_disparity_range(g(f0[:, :W]), g(f0[:, W:]))
     stereo, flow = ts.StereoEstimator(min_d, num_d), ts.FlowEstimator()
@@ -57,7 +59,7 @@ def main():
         frame = cv2.imread(f)
         gL, gR = g(frame[:, :W]), g(frame[:, W:])
         dL, _ = stereo(gL, gR)
-        bandL, bandR = ts.boundary_band(d["hL"], 10), ts.boundary_band(d["hR"], 10)
+        bandL, bandR = ts.boundary_band(d["hL"], bw), ts.boundary_band(d["hR"], bw)
         if prev is not None:
             fbL, vL, _ = flow.backward_with_validity(prev_g[0], gL)
             fbR, vR, _ = flow.backward_with_validity(prev_g[1], gR)

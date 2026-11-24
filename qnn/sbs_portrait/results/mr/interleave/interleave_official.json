@@ -1,0 +1,30 @@
+{
+ "commit": "d64567c",
+ "mode": "opt",
+ "size_policy": "official",
+ "profiles": "multires",
+ "seg_init_s": 4.160270372987725,
+ "sizes": {},
+ "interleave": {
+  "sizes": [
+   "1920x1080",
+   "640x480",
+   "1252x862"
+  ],
+  "frames": 60,
+  "gpu_mem_peak_mb_nvml": 1800.0,
+  "e2e_ms_median": {
+   "1920x1080": 151.08506398973987,
+   "640x480": 141.97819295804948,
+   "1252x862": 158.25876500457525
+  }
+ },
+ "gpu_mem_peak_mb_nvml": 1800.0,
+ "rss_peak_mb": 3086.2578125,
+ "ru_maxrss_mb": 3085.4921875,
+ "shape_switches": {
+  "backbone": 123,
+  "pixel_decoder": 123,
+  "decoder": 123
+ }
+}

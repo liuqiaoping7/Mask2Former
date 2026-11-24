@@ -1,0 +1,57 @@
+{
+ "commit": "d64567c",
+ "frames": 150,
+ "profile_sync": false,
+ "eye_wh": [
+  854,
+  480
+ ],
+ "work_wh": [
+  854,
+  480
+ ],
+ "work_params": {
+  "ellipse": 27,
+  "core": 9,
+  "gf_r": 4
+ },
+ "e2e_ms": {
+  "median": 529.4812140055001,
+  "mean": 530.0345652058303,
+  "p95": 537.0583814103156,
+  "std": 4.007601217217359,
+  "first": 442.51386902760714
+ },
+ "fps": 1.8886411331481392,
+ "modules_ms": {
+  "seg.model": 349.90690095582977,
+  "geo.flow": 78.2783729955554,
+  "seg.d2h": 40.35682702669874,
+  "geo.disparity": 21.008178999181837,
+  "compose": 10.359221952967346,
+  "alpha.guided": 8.702646009624004,
+  "alpha.disp_fill": 7.454645005054772,
+  "alpha.ema": 5.4689819808118045,
+  "alpha.soft": 1.5918659628368914,
+  "alpha.fusion": 1.3334440300241113,
+  "seg.preprocess": 0.9126150398515165,
+  "seg.person": 0.8368809940293431,
+  "geo.downscale": 0.48743997467681766,
+  "encode": 0.24790200404822826,
+  "read": 0.01672899816185236
+ },
+ "torch_max_allocated_mb": 2111.9169921875,
+ "torch_max_reserved_mb": 3130.0,
+ "gpu": "NVIDIA GeForce RTX 4060",
+ "gpu_mem_peak_mb_nvml": 3270.0,
+ "rss_peak_mb": 1964.8984375,
+ "init_s": 1.308189723000396,
+ "model_input_hw": [
+  480,
+  854
+ ],
+ "padded_hw": [
+  480,
+  864
+ ]
+}

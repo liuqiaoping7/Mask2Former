@@ -1,7 +1,12 @@
 """Production SBS portrait pipeline: only the `final` alpha path of sbs_portrait_bench.py.
 
 frame -> per-eye person segmentation -> disparity + optical flow -> soft alpha ->
-guided filter -> temporal EMA -> stereo fusion -> 1080p SBS composite.
+guided filter -> temporal EMA -> stereo fusion -> full-res SBS composite.
+
+Any eye size from VGA to 1080p (multi-resolution): the post-processing runs on a work grid of
+about 960x540 pixels (work_size: half of a 1080p eye, the eye itself when it is smaller) and
+the pixel-sized operators scale with the work height (work_params: 31x31 band / 9x9 core /
+guided radius 4 at 540 lines), so a 1080p eye is processed exactly as before.
 
 Evaluation (multi-config comparison, consistency metrics) lives in eval_alpha.py and
 runs offline on dumped alphas, so it is not on the latency path.
@@ -26,6 +31,26 @@ def split_sbs(img):
 
 def down(x, size, interp=cv2.INTER_AREA):
     return cv2.resize(x, size, interpolation=interp)
+
+
+WORK_PIXELS = 960 * 540
+
+
+def work_size(W, H, work_pixels=WORK_PIXELS):
+    """Work grid (w, h) for an eye of W x H: scale min(1, sqrt(work_pixels / (W H)))."""
+    s = min(1.0, (work_pixels / float(W * H)) ** 0.5)
+    return (int(W * s), int(H * s)), s
+
+
+def _odd(x):
+    return max(1, int(round((x - 1) / 2.0)) * 2 + 1)
+
+
+def work_params(ws):
+    """Pixel-sized operator sizes at work grid ws, relative to their 540-line values: person band
+    ellipse 31, person core erosion 9, guided-filter radius 4."""
+    k = ws[1] / 540.0
+    return {"ellipse": _odd(31 * k), "core": _odd(9 * k), "gf_r": max(1, int(round(4 * k)))}
 
 
 def nanpct(x, q, default):
@@ -68,21 +93,33 @@ class Timer:
 
 class SBSPortraitPipeline:
     def __init__(self, first_frame, bg_sbs, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS,
-                 work_scale=0.5, soft=(0.4, 0.6), gf=(4, 1e-4), lam=0.7, gate=0.5, bg_margin=4.0,
-                 precision="fp16", backbone="trt", post="gpu", overlap=True, timer=None):
-        """post: "gpu" (torch post-processing + compositing, see gpu_post.py) or "cpu" (reference).
-        overlap: run the CPU geometry (downscale, SGBM, DIS) in a worker thread while the GPU
-        segments the same frame (OpenCV and CUDA waits release the GIL)."""
+                 work_pixels=WORK_PIXELS, soft=(0.4, 0.6), gf_eps=1e-4, lam=0.7, gate=0.5, bg_margin=4.0,
+                 mode="opt", seg=None, size_policy="official", profiles="multires", timer=None):
+        """mode: "opt" -- the optimized pipeline (TensorRT engines with dynamic-shape profiles,
+        GPU pre / post-processing, CPU geometry overlapped in a worker thread); "ref" -- the
+        reference: PyTorch FP32 model, torch person post-processing, CPU (OpenCV / numpy)
+        post-processing and compositing, no overlap.
+        seg: an existing PersonSegmenter to share between pipelines (several videos / sizes in one
+        process: the engines are loaded once); otherwise one is created (size_policy, profiles).
+        bg_margin: background depth margin in pixels of a 1920-wide eye (scaled to the eye)."""
         self.timer = timer or Timer()
-        self.soft, self.gf = soft, gf
+        assert mode in ("opt", "ref")
+        post, overlap = ("gpu", True) if mode == "opt" else ("cpu", False)
         L0, R0 = split_sbs(first_frame)
         self.H, self.W = L0.shape[:2]
         H, W = self.H, self.W
-        self.ws = ws = (int(W * work_scale), int(H * work_scale))
-        s = work_scale
+        self.ws, s = work_size(W, H, work_pixels)
+        ws = self.ws
+        self.params = prm = work_params(ws)
+        self.soft, self.gf = soft, (prm["gf_r"], gf_eps)
 
-        self.seg = PersonSegmenter(config_file, weights, precision=precision, backbone=backbone, eye_hw=(H, W),
-                                   fast_decoder=True, pixel_decoder="trt", decoder="trt")
+        if seg is None:
+            if mode == "opt":
+                seg = PersonSegmenter(config_file, weights, precision="fp16", backbone="trt", fast_decoder=True,
+                                      pixel_decoder="trt", decoder="trt", profiles=profiles, size_policy=size_policy)
+            else:
+                seg = PersonSegmenter(config_file, weights, precision="fp32", fused=False, size_policy=size_policy)
+        self.seg = seg
         for _ in range(2):  # warm-up
             self.segment_eyes(L0, R0, record=False)
 
@@ -100,11 +137,12 @@ class SBSPortraitPipeline:
         bd_l, _ = ts.StereoEstimator(bmin, bnum)(gbL, gbR)
         _, h0, _, _ = self.segment_eyes(L0, R0, record=False)
         dL0, _ = self.stereo(gL0, gR0)
-        core = cv2.erode(h0.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+        c = prm["core"]
+        core = cv2.erode(h0.astype(np.uint8), np.ones((c, c), np.uint8)).astype(bool)
         person_p5 = nanpct(dL0[core], 5, 0.0) / s
         self.person_disp = nanpct(dL0[core], 50, 0.0)
         bg_p95 = nanpct(bd_l, 95, 0.0) / s
-        self.bg_shift = max(0.0, bg_p95 - person_p5 + bg_margin)
+        self.bg_shift = max(0.0, bg_p95 - person_p5 + bg_margin * W / 1920.0)
         if self.bg_shift > 0:
             bgR = ts.warp_h(bgR, np.full((H, W), -self.bg_shift, np.float32))
         self.bgL, self.bgR = bgL, bgR
@@ -112,7 +150,8 @@ class SBSPortraitPipeline:
         self.post = post
         self.pool = ThreadPoolExecutor(1, thread_name_prefix="geometry") if overlap else None
         if post == "gpu":
-            self.gp = GPUPost(ws, bgL, bgR, soft=soft, gf=gf, lam=lam, gate=gate, person_disp=self.person_disp)
+            self.gp = GPUPost(ws, bgL, bgR, soft=soft, gf=self.gf, lam=lam, gate=gate, person_disp=self.person_disp,
+                              ellipse=prm["ellipse"], core=prm["core"])
             self.up_stream = torch.cuda.Stream()  # geometry results are uploaded from the worker thread
 
     # ------------------------------------------------------------------ stages
@@ -148,10 +187,11 @@ class SBSPortraitPipeline:
 
     def fill_disparity(self, dL, dR, pL, hL, pR, hR):
         with self.timer("alpha.disp_fill"):
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+            e, c = self.params["ellipse"], self.params["core"]
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (e, e))
             bandL = cv2.dilate((hL | (pL > 0.3)).astype(np.uint8), k).astype(bool)
             bandR = cv2.dilate((hR | (pR > 0.3)).astype(np.uint8), k).astype(bool)
-            coreL = cv2.erode(hL.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+            coreL = cv2.erode(hL.astype(np.uint8), np.ones((c, c), np.uint8)).astype(bool)
             self.person_disp = nanpct(dL[coreL], 50, self.person_disp)
             d_def = nanpct(dL, 50, 0.0)
             return (ts.fill_disparity(dL, bandL, self.person_disp, d_def),
@@ -172,6 +212,10 @@ class SBSPortraitPipeline:
             aL = 0.5 * (tL + ts.warp_r2l(tR, dLf))
             aR = 0.5 * (tR + ts.warp_l2r(tL, dRf))
         return aL, aR
+
+    def close(self):
+        if self.pool is not None:
+            self.pool.shutdown()
 
     def compose(self, L, R, aL, aR):
         with self.timer("compose"):

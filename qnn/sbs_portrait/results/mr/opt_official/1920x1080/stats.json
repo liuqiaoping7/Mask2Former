@@ -1,0 +1,70 @@
+{
+ "commit": "d64567c",
+ "frames": 150,
+ "profile_sync": false,
+ "eye_wh": [
+  1920,
+  1080
+ ],
+ "work_wh": [
+  960,
+  540
+ ],
+ "work_params": {
+  "ellipse": 31,
+  "core": 9,
+  "gf_r": 4
+ },
+ "e2e_ms": {
+  "median": 152.7653579832986,
+  "mean": 152.719388910216,
+  "p95": 152.9850637773052,
+  "std": 0.21714336873700346,
+  "first": 169.24169199774042
+ },
+ "fps": 6.545986689661194,
+ "modules_ms": {
+  "geo.wait": 64.70732594607398,
+  "geo.flow": 53.67845296859741,
+  "gpu.post": 46.97682894766331,
+  "geo.disparity": 37.837763025891036,
+  "seg.model": 25.093967036809772,
+  "gpu.compose+d2h": 5.867652012966573,
+  "seg.person": 5.197472986765206,
+  "geo.upload": 5.024716025218368,
+  "gpu.upload_frame": 2.4890240165404975,
+  "geo.downscale": 1.6834280104376376,
+  "encode": 1.2071869568899274,
+  "seg.preprocess": 0.30386995058506727,
+  "read": 0.017503974959254265
+ },
+ "torch_max_allocated_mb": 963.74462890625,
+ "torch_max_reserved_mb": 1388.0,
+ "gpu": "NVIDIA GeForce RTX 4060",
+ "gpu_mem_peak_mb_nvml": 2054.0,
+ "rss_peak_mb": 3030.05078125,
+ "init_s": 0.6194815859780647,
+ "model_input_hw": [
+  750,
+  1333
+ ],
+ "padded_hw": [
+  768,
+  1344
+ ],
+ "profile": 0,
+ "profile_range": [
+  [
+   768,
+   1344
+  ],
+  [
+   768,
+   1344
+  ],
+  [
+   768,
+   1344
+  ]
+ ]
+}

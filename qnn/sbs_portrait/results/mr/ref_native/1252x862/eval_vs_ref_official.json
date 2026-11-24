@@ -1,0 +1,24 @@
+{
+ "quality": {
+  "tiou": 0.9926981783578359,
+  "tiou_p5": 0.9873822344835368,
+  "tflk_band": 0.02656254898944257,
+  "siou": 0.9989576252648745,
+  "siou_p5": 0.9986996988871791,
+  "sflk_band": 0.00387679650913924,
+  "ghost": 0.00940247447010865
+ },
+ "error_vs_ref": {
+  "alpha_mae_mean": 0.0,
+  "alpha_mae_worst_frame": 0.0,
+  "alpha_absmax": 0.0,
+  "alpha_iou_mean": 1.0,
+  "alpha_iou_min": 1.0,
+  "prob_mae_mean": 0.0,
+  "composite_psnr_db": {
+   "key_0000.png": Infinity,
+   "key_0075.png": Infinity,
+   "key_0149.png": Infinity
+  }
+ }
+}

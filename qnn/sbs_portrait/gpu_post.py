@@ -3,7 +3,7 @@
 Mirrors the CPU reference (temporal_stereo.py / pipeline.py, OpenCV + numpy) operation by
 operation, at the same work resolution:
   flow validity  fw-bw consistency + photometric check   (cv2.remap -> grid_sample, border)
-  disparity fill 31x31 elliptic dilation (exact: per-row distance to the nearest foreground
+  disparity fill elliptic dilation (31x31 at 540 lines) (exact: per-row distance to the nearest foreground
                  pixel vs the ellipse's half width at each row offset), 9x9 erosion
                  (min-pool), nanquantile
   soft alpha     smoothstep
@@ -11,7 +11,7 @@ operation, at the same work resolution:
                  the four first-pass and two second-pass box filters batched
   temporal EMA   motion-compensated, confidence + motion gate
   stereo fusion  horizontal warps through the filled disparities
-  compose        bilinear alpha upsample to 1080p (cv2 INTER_LINEAR), blend with the
+  compose        bilinear alpha upsample to the eye size (cv2 INTER_LINEAR), blend with the
                  GPU-resident background, truncate to uint8 like numpy astype
 Everything stays on the GPU; only the per-frame inputs (gray images, flows, disparities,
 the full-res frame) are uploaded through reusable pinned buffers and the composite is
@@ -51,7 +51,8 @@ class Pinned:
 
 class GPUPost:
     def __init__(self, ws, bgL, bgR, soft=(0.4, 0.6), gf=(4, 1e-4), lam=0.7, gate=0.5, sigma=10.0,
-                 person_disp=0.0, device="cuda"):
+                 person_disp=0.0, ellipse=31, core=9, device="cuda"):
+        """ellipse / core: person band dilation (OpenCV ellipse) and core erosion sizes (odd)."""
         self.dev = torch.device(device)
         self.ws = ws
         w, h = ws
@@ -59,12 +60,14 @@ class GPUPost:
         gy, gx = torch.meshgrid(torch.arange(h, device=self.dev, dtype=torch.float32),
                                 torch.arange(w, device=self.dev, dtype=torch.float32), indexing="ij")
         self.gx, self.gy = gx, gy
-        ell = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+        self.core = core
+        ell = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ellipse, ellipse))
+        c = ellipse // 2
         hw = []  # half width of each row (rows are runs centred on the middle column)
         for row in ell:
             on = np.flatnonzero(row)
             h = len(on) // 2
-            assert len(on) == 0 or list(on) == list(range(15 - h, 16 + h)), "ellipse rows must be centred runs"
+            assert len(on) == 0 or list(on) == list(range(c - h, c + 1 + h)), "ellipse rows must be centred runs"
             hw.append(h if len(on) else -1)
         self.ell_hw = torch.tensor(hw, dtype=torch.float32, device=self.dev)
         # background as CHW uint8 on the GPU (uploaded once)
@@ -103,7 +106,7 @@ class GPUPost:
             return self.dilate_ellipse(h | (p > 0.3))
 
         bandL, bandR = band(hL, pL), band(hR, pR)
-        core = -F.max_pool2d(-hL.float()[None, None], 9, stride=1, padding=4)[0, 0] > 0.5
+        core = -F.max_pool2d(-hL.float()[None, None], self.core, stride=1, padding=self.core // 2)[0, 0] > 0.5
         nan = torch.tensor(float("nan"), device=self.dev)
         pd = torch.nanquantile(torch.where(core, dL, nan).flatten(), 0.5)
         self.person_disp = torch.where(torch.isnan(pd), self.person_disp, pd)
