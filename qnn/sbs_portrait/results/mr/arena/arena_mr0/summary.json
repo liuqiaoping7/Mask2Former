@@ -1,0 +1,377 @@
+{
+ "commit": "60e546e",
+ "mode": "opt",
+ "size_policy": "official",
+ "profiles": "exact",
+ "seg_init_s": 5.910781202022918,
+ "sizes": {
+  "640x480": {
+   "e2e_ms": {
+    "median": 128.11634899117053,
+    "mean": 128.25370777365086,
+    "p95": 131.5952986071352,
+    "std": 1.6748254467035104,
+    "first": 219.18709698366
+   },
+   "fps": 7.805405070268726,
+   "init_s": 1.0942325959913433,
+   "work_wh": [
+    640,
+    480
+   ],
+   "model_input_hw": [
+    800,
+    1067
+   ],
+   "padded_hw": [
+    800,
+    1088
+   ],
+   "gpu_mem_peak_mb_nvml": 1174.0,
+   "rss_peak_mb": 2365.66796875,
+   "profile": 1,
+   "modules_ms": {
+    "gpu.post": 68.41,
+    "geo.flow": 32.22,
+    "geo.wait": 28.11,
+    "seg.model": 25.2,
+    "geo.disparity": 21.46,
+    "seg.person": 4.06,
+    "geo.upload": 3.33,
+    "gpu.compose+d2h": 0.89
+   }
+  },
+  "854x480": {
+   "e2e_ms": {
+    "median": 138.91956902807578,
+    "mean": 139.0078702592291,
+    "p95": 141.97288279538043,
+    "std": 1.789595785088614,
+    "first": 182.58272699313238
+   },
+   "fps": 7.198409892834457,
+   "init_s": 0.717340801958926,
+   "work_wh": [
+    854,
+    480
+   ],
+   "model_input_hw": [
+    749,
+    1333
+   ],
+   "padded_hw": [
+    768,
+    1344
+   ],
+   "gpu_mem_peak_mb_nvml": 1222.0,
+   "rss_peak_mb": 2501.421875,
+   "profile": 0,
+   "modules_ms": {
+    "gpu.post": 58.09,
+    "geo.wait": 47.55,
+    "geo.flow": 43.63,
+    "geo.disparity": 30.97,
+    "seg.model": 23.58,
+    "seg.person": 4.8,
+    "geo.upload": 4.05,
+    "gpu.compose+d2h": 1.31
+   }
+  },
+  "960x540": {
+   "e2e_ms": {
+    "median": 140.0443469756283,
+    "mean": 140.1658400277873,
+    "p95": 142.31833182275295,
+    "std": 1.3898251725022324,
+    "first": 192.16160097857937
+   },
+   "fps": 7.140595258543557,
+   "init_s": 0.5865238039987162,
+   "work_wh": [
+    960,
+    540
+   ],
+   "model_input_hw": [
+    750,
+    1333
+   ],
+   "padded_hw": [
+    768,
+    1344
+   ],
+   "gpu_mem_peak_mb_nvml": 1238.0,
+   "rss_peak_mb": 2563.65234375,
+   "profile": 0,
+   "modules_ms": {
+    "geo.wait": 62.41,
+    "geo.flow": 53.62,
+    "gpu.post": 43.81,
+    "geo.disparity": 32.82,
+    "seg.model": 23.52,
+    "geo.upload": 4.96,
+    "seg.person": 4.85,
+    "gpu.compose+d2h": 1.87
+   }
+  },
+  "1280x720": {
+   "e2e_ms": {
+    "median": 140.90483594918624,
+    "mean": 141.21654756932654,
+    "p95": 144.04545740108006,
+    "std": 1.4707886243116575,
+    "first": 191.02559803286567
+   },
+   "fps": 7.096988497688076,
+   "init_s": 0.5973440500092693,
+   "work_wh": [
+    960,
+    540
+   ],
+   "model_input_hw": [
+    750,
+    1333
+   ],
+   "padded_hw": [
+    768,
+    1344
+   ],
+   "gpu_mem_peak_mb_nvml": 1246.0,
+   "rss_peak_mb": 2615.34375,
+   "profile": 0,
+   "modules_ms": {
+    "geo.wait": 73.48,
+    "geo.flow": 54.09,
+    "geo.disparity": 36.21,
+    "gpu.post": 34.33,
+    "seg.model": 23.57,
+    "geo.downscale": 6.42,
+    "geo.upload": 4.91,
+    "seg.person": 4.88
+   }
+  },
+  "1440x1080": {
+   "e2e_ms": {
+    "median": 134.6742199966684,
+    "mean": 135.13785699947871,
+    "p95": 136.98576797614805,
+    "std": 1.1490195666163423,
+    "first": 238.3051390061155
+   },
+   "fps": 7.425326094517112,
+   "init_s": 0.570083623053506,
+   "work_wh": [
+    831,
+    623
+   ],
+   "model_input_hw": [
+    800,
+    1067
+   ],
+   "padded_hw": [
+    800,
+    1088
+   ],
+   "gpu_mem_peak_mb_nvml": 1264.0,
+   "rss_peak_mb": 2699.25390625,
+   "profile": 1,
+   "modules_ms": {
+    "geo.wait": 84.86,
+    "geo.flow": 60.65,
+    "geo.disparity": 39.33,
+    "seg.model": 23.04,
+    "gpu.post": 16.4,
+    "geo.downscale": 9.3,
+    "geo.upload": 4.99,
+    "seg.person": 4.11
+   }
+  },
+  "1920x1080": {
+   "e2e_ms": {
+    "median": 145.24372800951824,
+    "mean": 145.55026545422152,
+    "p95": 148.5668137029279,
+    "std": 1.5663375116830953,
+    "first": 167.1289189835079
+   },
+   "fps": 6.884978881390783,
+   "init_s": 0.6165601360262372,
+   "work_wh": [
+    960,
+    540
+   ],
+   "model_input_hw": [
+    750,
+    1333
+   ],
+   "padded_hw": [
+    768,
+    1344
+   ],
+   "gpu_mem_peak_mb_nvml": 1270.0,
+   "rss_peak_mb": 2736.47265625,
+   "profile": 0,
+   "modules_ms": {
+    "geo.wait": 62.57,
+    "geo.flow": 53.75,
+    "gpu.post": 44.69,
+    "geo.disparity": 34.41,
+    "seg.model": 24.47,
+    "geo.upload": 5.01,
+    "seg.person": 4.91,
+    "geo.downscale": 3.18
+   }
+  },
+  "1252x862": {
+   "e2e_ms": {
+    "median": 146.9141140114516,
+    "mean": 147.00079337095045,
+    "p95": 148.04268988082185,
+    "std": 0.8851916138546627,
+    "first": 224.1446339758113
+   },
+   "fps": 6.8066979590677885,
+   "init_s": 0.989195411966648,
+   "work_wh": [
+    867,
+    597
+   ],
+   "model_input_hw": [
+    800,
+    1162
+   ],
+   "padded_hw": [
+    800,
+    1184
+   ],
+   "gpu_mem_peak_mb_nvml": 1266.0,
+   "rss_peak_mb": 2858.9296875,
+   "profile": 4,
+   "modules_ms": {
+    "geo.wait": 79.5,
+    "geo.flow": 59.98,
+    "geo.disparity": 35.99,
+    "gpu.post": 32.1,
+    "seg.model": 23.67,
+    "geo.downscale": 8.97,
+    "geo.upload": 5.08,
+    "seg.person": 4.7
+   }
+  },
+  "676x504": {
+   "e2e_ms": {
+    "median": 130.6470870040357,
+    "mean": 130.46092765206205,
+    "p95": 133.15203188103624,
+    "std": 1.5917697860281392,
+    "first": 174.44738699123263
+   },
+   "fps": 7.6542081643895346,
+   "init_s": 0.4830893810139969,
+   "work_wh": [
+    676,
+    504
+   ],
+   "model_input_hw": [
+    800,
+    1073
+   ],
+   "padded_hw": [
+    800,
+    1088
+   ],
+   "gpu_mem_peak_mb_nvml": 1222.0,
+   "rss_peak_mb": 2859.3671875,
+   "profile": 1,
+   "modules_ms": {
+    "gpu.post": 64.24,
+    "geo.flow": 36.19,
+    "geo.wait": 34.56,
+    "seg.model": 25.32,
+    "geo.disparity": 24.15,
+    "seg.person": 4.11,
+    "geo.upload": 3.66,
+    "gpu.compose+d2h": 1.02
+   }
+  },
+  "1680x966": {
+   "e2e_ms": {
+    "median": 144.46540002245456,
+    "mean": 144.5223159472724,
+    "p95": 146.9805397267919,
+    "std": 1.2372218972308637,
+    "first": 167.62855497654527
+   },
+   "fps": 6.922072688993821,
+   "init_s": 0.6087481320137158,
+   "work_wh": [
+    949,
+    545
+   ],
+   "model_input_hw": [
+    766,
+    1333
+   ],
+   "padded_hw": [
+    768,
+    1344
+   ],
+   "gpu_mem_peak_mb_nvml": 1278.0,
+   "rss_peak_mb": 2901.6015625,
+   "profile": 0,
+   "modules_ms": {
+    "geo.wait": 77.89,
+    "geo.flow": 57.49,
+    "geo.disparity": 36.18,
+    "gpu.post": 29.99,
+    "seg.model": 23.93,
+    "geo.downscale": 10.26,
+    "geo.upload": 4.96,
+    "seg.person": 4.92
+   }
+  },
+  "1396x842": {
+   "e2e_ms": {
+    "median": 159.17774999979883,
+    "mean": 159.56647423195787,
+    "p95": 161.88142687897198,
+    "std": 1.4753293975616344,
+    "first": 178.92374598886818
+   },
+   "fps": 6.282285055551192,
+   "init_s": 0.9795252640033141,
+   "work_wh": [
+    927,
+    559
+   ],
+   "model_input_hw": [
+    800,
+    1326
+   ],
+   "padded_hw": [
+    800,
+    1344
+   ],
+   "gpu_mem_peak_mb_nvml": 1326.0,
+   "rss_peak_mb": 3039.6171875,
+   "profile": 9,
+   "modules_ms": {
+    "geo.wait": 71.65,
+    "geo.flow": 60.05,
+    "gpu.post": 44.66,
+    "geo.disparity": 38.06,
+    "seg.model": 31.33,
+    "geo.downscale": 8.54,
+    "seg.person": 6.01,
+    "geo.upload": 4.99
+   }
+  }
+ },
+ "gpu_mem_peak_mb_nvml": 1326.0,
+ "rss_peak_mb": 3039.6171875,
+ "ru_maxrss_mb": 3038.53125,
+ "shape_switches": {
+  "backbone": 4,
+  "pixel_decoder": 4,
+  "decoder": 4
+ }
+}
