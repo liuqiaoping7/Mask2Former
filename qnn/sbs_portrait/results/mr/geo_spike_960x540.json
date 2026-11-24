@@ -1,0 +1,26 @@
+{
+ "work_wh": [
+  960,
+  540
+ ],
+ "seq": {
+  "median_ms": 91.04351495625451,
+  "identical": null
+ },
+ "par2": {
+  "median_ms": 82.79862598283216,
+  "identical": true
+ },
+ "par3": {
+  "median_ms": 75.31498902244493,
+  "identical": true
+ },
+ "par5": {
+  "median_ms": 73.04805499734357,
+  "identical": true
+ },
+ "seq_again": {
+  "median_ms": 98.21321297204122,
+  "identical": true
+ }
+}

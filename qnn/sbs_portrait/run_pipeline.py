@@ -123,6 +123,7 @@ def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5)
     stats = {
         "commit": git_rev(), "frames": len(files), "profile_sync": timer.sync,
         "eye_wh": [W, H], "work_wh": list(pipe.ws), "work_params": pipe.params,
+        "geo_parallel": bool(getattr(pipe, "geo_par", False)),
         "e2e_ms": {"median": float(np.median(fm)), "mean": float(fm.mean()), "p95": float(np.percentile(fm, 95)),
                    "std": float(fm.std()), "first": float(frame_ms[0])},
         "fps": float(1000.0 / np.median(fm)),

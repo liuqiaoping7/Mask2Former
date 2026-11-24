@@ -94,14 +94,27 @@ class Timer:
 class SBSPortraitPipeline:
     def __init__(self, first_frame, bg_sbs, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS,
                  work_pixels=WORK_PIXELS, soft=(0.4, 0.6), gf_eps=1e-4, lam=0.7, gate=0.5, bg_margin=4.0,
-                 mode="opt", seg=None, size_policy="official", profiles="exact", timer=None):
+                 mode="opt", seg=None, size_policy="official", profiles="exact", geo_threads=4,
+                 geo_late_ms=5.0, timer=None):
         """mode: "opt" -- the optimized pipeline (TensorRT engines with dynamic-shape profiles,
         GPU pre / post-processing, CPU geometry overlapped in a worker thread); "ref" -- the
         reference: PyTorch FP32 model, torch person post-processing, CPU (OpenCV / numpy)
         post-processing and compositing, no overlap.
         seg: an existing PersonSegmenter to share between pipelines (several videos / sizes in one
         process: the engines are loaded once); otherwise one is created (size_policy, profiles).
-        bg_margin: background depth margin in pixels of a 1920-wide eye (scaled to the eye)."""
+        bg_margin: background depth margin in pixels of a 1920-wide eye (scaled to the eye).
+        geo_threads: the geometry worker can run the left / right SGBM matches and the left / right
+        DIS flow pairs as this many concurrent tasks (own SGBM / DIS instances each; 1 = in turn).
+        At 1080p the geometry is hidden behind the GPU; for small eyes (native size policy) the GPU
+        part gets shorter than the serial geometry, which then sets the frame time. Parallel
+        geometry costs 1-3 ms of GPU-path time through CPU contention when it is not needed, so it
+        is switched on adaptively, when the geometry is clearly late: the GPU idles between the end
+        of the segmentation and the arrival of the geometry for > geo_late_ms on average (5 ms:
+        above the 2-3 ms the parallel tasks cost the GPU path). The idle time is measured with CUDA
+        events (segmentation done -> an event recorded when the geometry returns), averaged from
+        the 11th frame on (EMA 0.1); the main thread's wait is no criterion: it reaches the wait
+        while the GPU is still segmenting. Measured steady idle: 676x504 ~2.5 ms (stays serial,
+        parallel would cost 2.6 ms), 854x480 ~7 ms, 960x540 ~19 ms (switch)."""
         self.timer = timer or Timer()
         assert mode in ("opt", "ref")
         post, overlap = ("gpu", True) if mode == "opt" else ("cpu", False)
@@ -127,6 +140,15 @@ class SBSPortraitPipeline:
         min_d, num_d, _, _ = ts.estimate_disparity_range(gL0, gR0)
         self.stereo = ts.StereoEstimator(min_d, num_d)
         self.flow = ts.FlowEstimator()
+        self.geo_threads = geo_threads if mode == "opt" else 1
+        if self.geo_threads > 1:  # thread-private OpenCV matchers (not thread safe)
+            self.stereo_r = ts.StereoEstimator(min_d, num_d)
+            self.flow_r = ts.FlowEstimator()
+            self.gpool = ThreadPoolExecutor(self.geo_threads - 1, thread_name_prefix="geo")
+        self.geo_par = False  # switched on when the geometry is on the critical path
+        self.late_ema = 0.0
+        self.geo_late_ms = geo_late_ms
+        self.frames = 0
         self.ema = {"L": ts.TemporalEMA(lam, gate=gate), "R": ts.TemporalEMA(lam, gate=gate)}
 
         # virtual background + depth placement (same as the benchmark)
@@ -216,6 +238,8 @@ class SBSPortraitPipeline:
     def close(self):
         if self.pool is not None:
             self.pool.shutdown()
+        if getattr(self, "gpool", None) is not None:
+            self.gpool.shutdown()
 
     def compose(self, L, R, aL, aR):
         with self.timer("compose"):
@@ -243,8 +267,23 @@ class SBSPortraitPipeline:
         with tm("seg.preprocess"):
             pre = [self.seg.preprocess_gpu(frame_t[:, :self.W]), self.seg.preprocess_gpu(frame_t[:, self.W:])]
         pL, hL, pR, hR = self.segment_eyes(L, R, gpu=True, pre=pre)
+        seg_done = torch.cuda.Event(enable_timing=True)
+        seg_done.record()
         with tm("geo.wait"):  # time the GPU path waits for the CPU geometry (0 when fully hidden)
             gL, gR, dL, dR, flows, (dev, done) = geo.result() if geo else self.cpu_geometry(L, R, True)
+            late_ms = 0.0
+            if self.geo_threads > 1 and not self.geo_par and seg_done.query():
+                # the stream is idle (nothing queued after the segmentation): an event recorded now
+                # completes at once, its distance to seg_done is the GPU idle time = the lateness
+                now = torch.cuda.Event(enable_timing=True)
+                now.record()
+                now.synchronize()
+                late_ms = seg_done.elapsed_time(now)
+            self.frames += 1
+            if self.frames > 10:  # the first frames have transient spikes (5-19 ms even when hidden)
+                self.late_ema = 0.9 * self.late_ema + 0.1 * late_ms
+            if self.geo_threads > 1 and not self.geo_par and self.late_ema > self.geo_late_ms:
+                self.geo_par = True  # geometry is on the critical path: run its parts concurrently
         with tm("gpu.post", gpu=True):
             cur = torch.cuda.current_stream()
             cur.wait_event(done)  # uploads ran on up_stream while the GPU was segmenting
@@ -276,13 +315,23 @@ class SBSPortraitPipeline:
         with tm("geo.downscale"):
             gL = cv2.cvtColor(down(L, self.ws), cv2.COLOR_BGR2GRAY)
             gR = cv2.cvtColor(down(R, self.ws), cv2.COLOR_BGR2GRAY)
-        with tm("geo.disparity"):
-            dL, dR = self.stereo(gL, gR)
-        with tm("geo.flow"):
-            flows = None
-            if self.prev_g is not None:
-                pgL, pgR = self.prev_g
-                flows = (self.flow(gL, pgL), self.flow(pgL, gL), self.flow(gR, pgR), self.flow(pgR, gR))
+        if self.geo_par:
+            with tm("geo.parallel"):  # left / right SGBM and the two flow pairs concurrently
+                pg = self.prev_g
+                fr = self.gpool.submit(self.stereo_r.right, gL, gR)
+                ffl = self.gpool.submit(lambda: (self.flow(gL, pg[0]), self.flow(pg[0], gL))) if pg else None
+                ffr = self.gpool.submit(lambda: (self.flow_r(gR, pg[1]), self.flow_r(pg[1], gR))) if pg else None
+                dL = self.stereo.left(gL, gR)
+                dL, dR = self.stereo.check(dL, fr.result())
+                flows = (*ffl.result(), *ffr.result()) if pg else None
+        else:
+            with tm("geo.disparity"):
+                dL, dR = self.stereo(gL, gR)
+            with tm("geo.flow"):
+                flows = None
+                if self.prev_g is not None:
+                    pgL, pgR = self.prev_g
+                    flows = (self.flow(gL, pgL), self.flow(pgL, gL), self.flow(gR, pgR), self.flow(pgR, gR))
         self.prev_g = (gL, gR)
         if not upload:
             return gL, gR, dL, dR, flows

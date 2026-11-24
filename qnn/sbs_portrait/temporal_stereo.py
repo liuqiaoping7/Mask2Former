@@ -114,10 +114,21 @@ class StereoEstimator:
         d[d < self.min_disp] = np.nan
         return d
 
+    def left(self, gray_l, gray_r):
+        """Raw left disparity (before the L/R check)."""
+        return self._disp(gray_l, gray_r)
+
+    def right(self, gray_l, gray_r):
+        """Raw right disparity (matched on the mirrored pair, before the L/R check)."""
+        return np.fliplr(self._disp(np.fliplr(gray_r).copy(), np.fliplr(gray_l).copy())).copy()
+
     def __call__(self, gray_l, gray_r):
         """Return left/right disparity maps (NaN = invalid) after L/R check."""
-        dl = self._disp(gray_l, gray_r)
-        dr = np.fliplr(self._disp(np.fliplr(gray_r).copy(), np.fliplr(gray_l).copy())).copy()
+        return self.check(self.left(gray_l, gray_r), self.right(gray_l, gray_r))
+
+    @staticmethod
+    def check(dl, dr):
+        """Left/right consistency check (in place)."""
         dr_at_l = warp_h(np.nan_to_num(dr, nan=-1e4), -np.nan_to_num(dl), cv2.INTER_NEAREST)
         dl_at_r = warp_h(np.nan_to_num(dl, nan=-1e4), np.nan_to_num(dr), cv2.INTER_NEAREST)
         dl[~(np.abs(dl - dr_at_l) <= 1.5)] = np.nan
