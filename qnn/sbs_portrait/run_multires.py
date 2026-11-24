@@ -28,10 +28,11 @@ from run_pipeline import MemMonitor, git_rev, pip_source, run_sequence
 from seg import DEFAULT_CONFIG, DEFAULT_WEIGHTS, PersonSegmenter
 
 
-def make_seg(mode, size_policy, profiles):
+def make_seg(mode, size_policy, profiles, trt_arena=True):
     if mode == "opt":
         return PersonSegmenter(DEFAULT_CONFIG, DEFAULT_WEIGHTS, precision="fp16", backbone="trt", fast_decoder=True,
-                               pixel_decoder="trt", decoder="trt", profiles=profiles, size_policy=size_policy)
+                               pixel_decoder="trt", decoder="trt", profiles=profiles, size_policy=size_policy,
+                               trt_arena=trt_arena)
     return PersonSegmenter(DEFAULT_CONFIG, DEFAULT_WEIGHTS, precision="fp32", fused=False, size_policy=size_policy)
 
 
@@ -58,6 +59,7 @@ def main():
     ap.add_argument("--size-policy", default="official", choices=("official", "native", "aligned"))
     ap.add_argument("--pip", default="", help="picture-in-picture: frame | icon | <SBS RGBA png>")
     ap.add_argument("--compose-kernel", default="triton", help="pip_compose.KINDS")
+    ap.add_argument("--trt-arena", type=int, default=1, help="1: TRTChain arena, 0: per-engine buffers + pool")
     ap.add_argument("--profiles", default="exact")
     ap.add_argument("--profile", action="store_true", help="sync per GPU module (module breakdown)")
     ap.add_argument("--dump", action="store_true")
@@ -73,7 +75,7 @@ def main():
     mon = MemMonitor()
     mon.start()
     t0 = time.perf_counter()
-    seg = make_seg(a.mode, a.size_policy, a.profiles)
+    seg = make_seg(a.mode, a.size_policy, a.profiles, bool(a.trt_arena))
     seg_init_s = time.perf_counter() - t0
     gpu_peak = rss_peak = 0
     summary = {"commit": git_rev(), "mode": a.mode, "size_policy": a.size_policy, "profiles": a.profiles,

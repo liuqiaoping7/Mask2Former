@@ -21,9 +21,10 @@ Profiles are given on the model input (H, W); each stage derives its input shape
 
 TRTRunner runs a plan on torch tensors:
   * picks the narrowest profile containing the input shapes (cached per shape),
-  * one execution context per profile (created on first use); all contexts of all engines share one
-    activation buffer (USER_MANAGED), grown to the largest profile actually used (not to the largest
-    profile of the engine up front: 1080p needs 257 MB, the largest "exact" profile 478 MB),
+  * one execution context per profile (created on first use); standalone calls: all contexts of all
+    engines share one activation buffer (USER_MANAGED), grown to the largest profile actually used,
+  * TRTChain: the backbone -> pixel decoder -> decoder chain in one ping-pong arena with only the live
+    scratch and inter-stage tensors (exact per-shape scratch sizes),
   * one buffer per output sized for the largest shape of any profile; each call returns
     contiguous views of its first elements, so changing the resolution allocates nothing and
     the output addresses are set once per context; set_input_shape only when the shape changes,
@@ -78,7 +79,7 @@ def plan_tag(profiles):
 
 
 def build(onnx_path, plan, profiles, stage_shapes, fp16=True, in_dtypes=None, out_dtypes=None,
-          configure=None, workspace_gb=2, plugins=False, batch=1, detailed=False, log=print):
+          configure=None, workspace_gb=2, plugins=False, batch=1, detailed=False, workspace_mb=None, log=print):
     """Parse onnx_path and build plan with one optimization profile per entry of `profiles`
     (model-input (min, opt, max) HxW); stage_shapes(H, W) -> {input name: shape}.
     configure(net, cfg): extra network / config edits (precision pins)."""
@@ -101,7 +102,7 @@ def build(onnx_path, plan, profiles, stage_shapes, fp16=True, in_dtypes=None, ou
         if out_dtypes and t.name in out_dtypes:
             t.dtype = out_dtypes[t.name]
     cfg = builder.create_builder_config()
-    cfg.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gb << 30)
+    cfg.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, (workspace_mb << 20) if workspace_mb else (workspace_gb << 30))
     if fp16:
         cfg.set_flag(trt.BuilderFlag.FP16)
     else:  # strict FP32 (conversion checks): no TF32 tactics
@@ -193,7 +194,7 @@ class TRTRunner:
                 numel[n] = max(numel[n], _vol(probe.get_tensor_shape(n)))
         del probe
         self.numel = numel
-        self.buf = None  # allocated on first use
+        self.buf = None  # standalone calls only (allocated on first use); TRTChain places outputs itself
         self.ctx = [None] * n_prof
         self.cur = [None] * n_prof        # input shapes currently set on each context
         self.out_shape = [None] * n_prof
@@ -254,3 +255,111 @@ def _vol(s):
     for d in s:
         v *= d
     return v
+
+
+class TRTChain:
+    """A linear chain of engines (stage i's inputs are stage i-1's outputs, e.g. backbone -> pixel decoder
+    -> decoder) in one ping-pong arena that holds every stage's scratch (activation) memory and every
+    inter-stage tensor.
+
+    Live data while stage i runs: its inputs (stage i-1's outputs), its scratch and its outputs; the
+    previous stage's scratch and everything older are dead. So stages alternate the arena end their
+    outputs go to (even stages: bottom, odd stages: top) and put their scratch between the inputs and the
+    outputs:
+        stage 0:  [ out0 | scratch0 ................. ]
+        stage 1:  [ out0 | scratch1 ........ | out1 ]      (scratch1 reuses scratch0)
+        stage 2:  [ out2 | scratch2 ........ | out1 ]      (out2 reuses out0, scratch2 reuses both)
+    arena = max_i (|out_{i-1}| + |scratch_i| + |out_i|), with the scratch size TensorRT reports for the
+    current shapes (update_device_memory_size_for_shapes, not the profile maximum). Versus a shared pool of
+    the largest profile scratch plus separate max-shape output buffers, this keeps only what is live. The
+    arena grows when a new input size needs more. Outputs of the last stage are views into the arena:
+    consume them (same stream) before the next call. Inter-stage hand-off is zero-copy, so a stage's input
+    dtype must equal the previous stage's output dtype.
+
+    links[i] (i >= 1): {input name of stage i: output name of stage i-1}."""
+
+    ALIGN = 512  # setDeviceMemory requires 512-byte aligned scratch (outputs need 256)
+
+    def __init__(self, runners, links):
+        self.runners, self.links = runners, links
+        self.arena, self.version = None, 0
+        self.layouts, self.bound = {}, {}
+        for i in range(1, len(runners)):
+            for a, b in links[i].items():
+                assert runners[i].in_dtype[a] == runners[i - 1].out_dtype[b], f"stage {i} input {a}: dtype differs"
+
+    def _al(self, n):
+        return -(-int(n) // self.ALIGN) * self.ALIGN
+
+    def _ctx(self, r, p, stream):
+        if r.ctx[p] is None:
+            ctx = r.ctx[p] = r.engine.create_execution_context(trt.ExecutionContextAllocationStrategy.USER_MANAGED)
+            ctx.set_optimization_profile_async(p, stream.cuda_stream)
+        return r.ctx[p]
+
+    def _layout(self, x_shape, stream):
+        st, shapes_in = [], {self.runners[0].inputs[0]: x_shape}
+        for i, r in enumerate(self.runners):
+            shapes = tuple(tuple(shapes_in[n]) for n in r.inputs)
+            p = r.profile_for(shapes)
+            ctx = self._ctx(r, p, stream)
+            for n, sh in zip(r.inputs, shapes):
+                ctx.set_input_shape(n, sh)
+            outs = {n: tuple(ctx.get_tensor_shape(n)) for n in r.outputs}
+            nbytes = {n: self._al(_vol(sh) * torch.empty((), dtype=r.out_dtype[n]).element_size()) for n, sh in outs.items()}
+            st.append({"p": p, "shapes": shapes, "outs": outs, "nbytes": nbytes, "out_size": sum(nbytes.values()),
+                       "scratch": self._al(ctx.update_device_memory_size_for_shapes())})
+            self.bound.pop((i, p), None)  # shapes changed on this context: rebind on the next call
+            if i + 1 < len(self.runners):
+                shapes_in = {a: outs[b] for a, b in self.links[i + 1].items()}
+        total = max((st[i - 1]["out_size"] if i else 0) + s["scratch"] + s["out_size"] for i, s in enumerate(st))
+        for i, s in enumerate(st):
+            bottom = i % 2 == 0
+            prev = st[i - 1]["out_size"] if i else 0
+            o = 0 if bottom else total - s["out_size"]
+            s["out_off"] = {}
+            for n in s["outs"]:
+                s["out_off"][n] = o
+                o += s["nbytes"][n]
+            s["scratch_off"] = s["out_size"] if bottom else prev
+        return {"total": total, "stages": st}
+
+    def __call__(self, x):
+        stream = torch.cuda.current_stream()
+        POOL.order(stream)
+        r0 = self.runners[0]
+        x = x.to(r0.in_dtype[r0.inputs[0]]).contiguous()
+        key = tuple(x.shape)
+        lay = self.layouts.get(key)
+        if lay is None:
+            lay = self.layouts[key] = self._layout(key, stream)
+        if self.arena is None or self.arena.numel() < lay["total"]:
+            torch.cuda.synchronize()
+            self.arena = None
+            torch.cuda.empty_cache()
+            self.arena = torch.empty(lay["total"], dtype=torch.uint8, device="cuda")
+            self.version += 1
+        base = self.arena.data_ptr()
+        st = lay["stages"]
+        for i, (r, s) in enumerate(zip(self.runners, st)):
+            ctx = r.ctx[s["p"]]
+            tag = (key, self.version)
+            if self.bound.get((i, s["p"])) != tag:
+                for n, sh in zip(r.inputs, s["shapes"]):
+                    ctx.set_input_shape(n, sh)
+                ctx.set_device_memory(base + s["scratch_off"], s["scratch"])
+                for n, off in s["out_off"].items():
+                    ctx.set_tensor_address(n, base + off)
+                if i:
+                    for a, b in self.links[i].items():
+                        ctx.set_tensor_address(a, base + st[i - 1]["out_off"][b])
+                self.bound[(i, s["p"])] = tag
+                r.switches += 1
+            if i == 0:
+                ctx.set_tensor_address(r.inputs[0], x.data_ptr())
+            if not ctx.execute_async_v3(stream.cuda_stream):
+                raise RuntimeError("TensorRT execution failed")
+        x.record_stream(stream)
+        r, s = self.runners[-1], st[-1]
+        return {n: self.arena[s["out_off"][n]:s["out_off"][n] + s["nbytes"][n]].view(r.out_dtype[n])[:_vol(sh)].view(sh)
+                for n, sh in s["outs"].items()}

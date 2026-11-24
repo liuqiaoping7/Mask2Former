@@ -68,6 +68,16 @@ def git_rev():
         return "?"
 
 
+def trt_mem(seg):
+    """TensorRT runtime buffers (MB): chain arena, shared scratch pool, standalone output buffers."""
+    import trt_common as tc
+
+    mb = lambda t: (t.numel() * t.element_size() / 2**20) if t is not None else 0.0  # noqa: E731
+    runners = [r for r in (getattr(seg, "trt", None), getattr(seg, "trt_pd", None), getattr(seg, "trt_td", None)) if r]
+    return {"arena": mb(seg.chain.arena) if getattr(seg, "chain", None) else 0.0, "pool": mb(tc.POOL.buf),
+            "out_bufs": sum(mb(t) for r in runners if r.buf for t in r.buf.values())}
+
+
 def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5):
     """Process `files` with `pipe` (decode prefetched, encode asynchronous, like a player) and
     return the stats dict; latency excludes the first `skip` frames."""
@@ -132,6 +142,7 @@ def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5)
         "torch_max_reserved_mb": torch.cuda.max_memory_reserved() / 2**20,
         "gpu": torch.cuda.get_device_name(0),
     }
+    stats["trt_mem_mb"] = trt_mem(pipe.seg)
     if mon is not None:
         stats["gpu_mem_peak_mb_nvml"] = mon.gpu_peak / 2**20
         stats["rss_peak_mb"] = mon.rss_peak / 2**20
@@ -165,6 +176,7 @@ def main():
     ap.add_argument("--pip", default="", help="picture-in-picture: frame | icon | <SBS RGBA png>")
     ap.add_argument("--compose-kernel", default="triton", help="pip_compose.KINDS")
     ap.add_argument("--msda-plugin", default="builtin", choices=("builtin", "upstream"))
+    ap.add_argument("--trt-arena", type=int, default=1, help="1: TRTChain arena, 0: per-engine buffers + pool")
     ap.add_argument("--profiles", default="exact", help="trt_common.PROFILE_SETS name")
     args = ap.parse_args()
     files = sorted(glob(os.path.join(args.frames, "*.jpg")))[: args.max_frames]
@@ -176,7 +188,8 @@ def main():
     timer = Timer(sync=args.profile)
     pipe = SBSPortraitPipeline(cv2.imread(files[0]), cv2.imread(args.bg), timer=timer, mode=args.mode,
                                size_policy=args.size_policy, profiles=args.profiles, pip=pip_source(args.pip),
-                               compose_kernel=args.compose_kernel, msda_plugin=args.msda_plugin)
+                               compose_kernel=args.compose_kernel, msda_plugin=args.msda_plugin,
+                               trt_arena=bool(args.trt_arena))
     init_s = time.perf_counter() - t_init
     stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip)
     mon.stop()

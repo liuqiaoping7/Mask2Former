@@ -29,7 +29,7 @@ class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
                  backbone="torch", eye_hw=None, trt_plan=None, fused=True, fast_decoder=False,
                  compile_decoders=False, pixel_decoder="torch", decoder="torch", profiles="exact",
-                 size_policy="official", batch=1, msda_plugin="builtin"):
+                 size_policy="official", batch=1, msda_plugin="builtin", trt_arena=True):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
@@ -48,6 +48,8 @@ class PersonSegmenter:
         batch: engine batch size (2 = both eyes in one call: person() then takes both eyes).
         msda_plugin: MSDA in the pixel-decoder engine -- "builtin" (TensorRT's plugin) or "upstream"
         (plugin wrapping this project's CUDA kernel, FP32 only; comparison reference, trt_msda_plugin.py).
+        trt_arena: run the three engines as a trt_common.TRTChain (scratch and inter-stage tensors in
+        one ping-pong arena); False: each engine with its own output buffers and a shared scratch pool.
         eye_hw / trt_plan: ignored (static engines of the 1080p-only version).
         fused: person() post-processing with the fused Triton kernel (person_triton.py) instead
         of the grid_sample / matmul / argmax torch ops.
@@ -108,9 +110,14 @@ class PersonSegmenter:
                 head.pixel_decoder.forward_features = torch.compile(head.pixel_decoder.forward_features, **opts)
             if decoder != "trt":
                 head.predictor.forward = torch.compile(head.predictor.forward, **opts)
-        self.trt = self.trt_pd = self.trt_td = None
+        self.trt = self.trt_pd = self.trt_td = self.chain = None
         if backbone == "trt":
             self._load_engines(profiles, pixel_decoder, decoder, fast_decoder, batch, msda_plugin)
+            if trt_arena and self.trt_td is not None:
+                import trt_common as tc
+                self.chain = tc.TRTChain([self.trt, self.trt_pd, self.trt_td],
+                                         [None, {k: k for k in ("res2", "res3", "res4", "res5")},
+                                          {"ms0": "ms0", "ms1": "ms1", "ms2": "ms2", "mf": "mask_features"}])
 
     def _load_engines(self, profiles, pixel_decoder, decoder, fast_decoder, batch=1, msda_plugin="builtin"):
         """Build (first use) and load the dynamic-shape engines; releases the torch weights."""
@@ -294,12 +301,15 @@ class PersonSegmenter:
                    for x in xs]
             il = ImageList.from_tensors(ims, m.size_divisibility)
             with torch.autocast("cuda", dtype=torch.float16, enabled=self.fp16):
-                feats = self.trt(il.tensor) if self.trt is not None else m.backbone(il.tensor)
-                if self.trt_pd is not None:
-                    mf, ms = self.trt_pd(feats)
-                    out = self.trt_td(ms, mf) if self.trt_td is not None else m.sem_seg_head.predictor(ms, mf, None)
+                if self.chain is not None:  # three engines in one arena (outputs are views into it)
+                    out = self.chain(il.tensor)
                 else:
-                    out = m.sem_seg_head(feats)
+                    feats = self.trt(il.tensor) if self.trt is not None else m.backbone(il.tensor)
+                    if self.trt_pd is not None:
+                        mf, ms = self.trt_pd(feats)
+                        out = self.trt_td(ms, mf) if self.trt_td is not None else m.sem_seg_head.predictor(ms, mf, None)
+                    else:
+                        out = m.sem_seg_head(feats)
         cls_all = out["pred_logits"].float().softmax(-1)  # B, Q, C+1 (tiny, keep FP32)
         masks = out["pred_masks"].to(pdt)                   # B, Q, Hp/4, Wp/4
         num_classes = cls_all.shape[-1] - 1
