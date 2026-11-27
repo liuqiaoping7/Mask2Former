@@ -284,6 +284,9 @@ class TRTChain:
         self.runners, self.links = runners, links
         self.arena, self.version = None, 0
         self.layouts, self.bound = {}, {}
+        # own execution contexts: a context keeps the device memory and tensor addresses it was given,
+        # so sharing them with standalone TRTRunner calls silently corrupts those calls
+        self.ctxs = [[None] * len(r.ctx) for r in runners]
         for i in range(1, len(runners)):
             for a, b in links[i].items():
                 assert runners[i].in_dtype[a] == runners[i - 1].out_dtype[b], f"stage {i} input {a}: dtype differs"
@@ -291,18 +294,20 @@ class TRTChain:
     def _al(self, n):
         return -(-int(n) // self.ALIGN) * self.ALIGN
 
-    def _ctx(self, r, p, stream):
-        if r.ctx[p] is None:
-            ctx = r.ctx[p] = r.engine.create_execution_context(trt.ExecutionContextAllocationStrategy.USER_MANAGED)
+    def _ctx(self, i, p, stream):
+        ctx = self.ctxs[i][p]
+        if ctx is None:
+            ctx = self.ctxs[i][p] = self.runners[i].engine.create_execution_context(
+                trt.ExecutionContextAllocationStrategy.USER_MANAGED)
             ctx.set_optimization_profile_async(p, stream.cuda_stream)
-        return r.ctx[p]
+        return ctx
 
     def _layout(self, x_shape, stream):
         st, shapes_in = [], {self.runners[0].inputs[0]: x_shape}
         for i, r in enumerate(self.runners):
             shapes = tuple(tuple(shapes_in[n]) for n in r.inputs)
             p = r.profile_for(shapes)
-            ctx = self._ctx(r, p, stream)
+            ctx = self._ctx(i, p, stream)
             for n, sh in zip(r.inputs, shapes):
                 ctx.set_input_shape(n, sh)
             outs = {n: tuple(ctx.get_tensor_shape(n)) for n in r.outputs}
@@ -342,7 +347,7 @@ class TRTChain:
         base = self.arena.data_ptr()
         st = lay["stages"]
         for i, (r, s) in enumerate(zip(self.runners, st)):
-            ctx = r.ctx[s["p"]]
+            ctx = self.ctxs[i][s["p"]]
             tag = (key, self.version)
             if self.bound.get((i, s["p"])) != tag:
                 for n, sh in zip(r.inputs, s["shapes"]):
