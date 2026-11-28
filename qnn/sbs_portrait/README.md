@@ -52,17 +52,17 @@ python sbs_portrait_bench.py --frames ~/data/sbs/portrait_0121 --bg ~/data/sbs/b
 
 | 模块 | 实现 | 开关 |
 | ---- | ---- | ---- |
-| 模型输入缩放 | GPU：OpenCV INTER_AREA 权重 + 归一化融合的 Triton kernel（`area_triton.py`），直接读已上传的整帧 | `pre=[seg.preprocess_gpu(eye)]` |
+| 模型输入缩放 | GPU：OpenCV INTER_AREA 权重 + 归一化融合的 Triton kernel（`area_triton.py`；CUDA global / 纹理采样对照实现见 `area_cuda.py`），直接读已上传的整帧 | `pre=[seg.preprocess_gpu(eye)]` |
 | backbone | TensorRT FP16 动态形状 engine，形状无关的 Swin 导出（`dyn_export.py`、`trt_backbone.py`） | `backbone="trt"`、`profiles` |
 | pixel decoder | TensorRT FP16 engine，MSDA 用内置 `MultiscaleDeformableAttnPlugin_TRT`，闭式位置编码，多尺度特征 NHWC 输出（`trt_pixel_decoder.py`） | `pixel_decoder="trt"` |
 | transformer decoder | 推理专用 forward 导出的 TensorRT FP16 engine，注意力 mask 为有限值加性 mask（`trt_decoder.py`） | `fast_decoder`、`decoder="trt"` |
 | TensorRT 运行时 | 多 optimization profile（常见离散尺寸用精确 profile + ranged 兜底），懒创建执行上下文；三段以线性链运行在一个乒乓 arena 里（只保留存活的 scratch 与段间张量，段间特征 FP16），1080p 显存峰值 1078 MB（`trt_common.py` 的 `TRTChain`） | `profiles="exact"`、`trt_arena`、`fp16_features` |
-| person 后处理 | Triton 融合 kernel（`person_triton.py`），直接输出到工作网格 | `fused` |
-| alpha 后处理 + 合成 | GPU（`gpu_post.py`：精确等价的快速椭圆膨胀、可分离 box），pinned 缓冲上传 / 回传 | `post="gpu"` |
+| person 后处理 | CUDA 融合 kernel（`person_cuda.py`，shared memory 计数），直接输出到工作网格；Triton 版（`person_triton.py`）可选 | `fused`、`person_kernel="cuda"` |
+| alpha 后处理 + 合成 | GPU（`gpu_post.py`：精确等价的快速椭圆膨胀；warp 与可分离 box 为 Triton kernel，`warp_box.py`），pinned 缓冲上传 / 回传 | `post="gpu"`、`post_kernels="triton"` |
 | 视差 / 光流 | CPU 工作线程，与 GPU 分割并行；结果在工作线程内经独立 copy stream 上传；几何晚于 GPU 时自动拆成 4 路并行 | `geo_threads`、`geo_late_ms` |
 | 合成 + 画中画 | Triton 融合合成 kernel + 画中画 kernel（`pip_compose.py`，另有 torch / CUDA / CUDA 纹理采样实现） | `compose_kernel`、`pip` |
 
-首次运行在 `weights/` 下构建三个 engine（`exact` 集合 14 个 profile：约 5.5～11 分钟，主机内存峰值约 10 GB，plan 共 653 MB），之后启动约 7 s。engine 与 GPU 型号、TensorRT 版本绑定，不入库。`pixel_decoder="torch"` 路径的 `compile_decoders` 仍可用，其 Inductor 缓存写在 `weights/inductor_cache`。逐项优化的测量结果见 `results/opt/`（`rejected_*` 为已回退的尝试），过程与候选池见 `results/opt/LOG.md`。
+`person_cuda.py` 首次使用时用 nvcc 编译（需要 CUDA toolkit，默认 `CUDA_HOME=/usr/local/cuda-12.8`，缓存在 `~/.cache/torch_extensions`）；没有编译环境时用 `--person-kernel triton`。首次运行在 `weights/` 下构建三个 engine（`exact` 集合 14 个 profile：约 5.5～11 分钟，主机内存峰值约 10 GB，plan 共 653 MB），之后启动约 7 s。engine 与 GPU 型号、TensorRT 版本绑定，不入库。`pixel_decoder="torch"` 路径的 `compile_decoders` 仍可用，其 Inductor 缓存写在 `weights/inductor_cache`。逐项优化的测量结果见 `results/opt/`（`rejected_*` 为已回退的尝试），过程与候选池见 `results/opt/LOG.md`。
 
 ## 多分辨率（每眼 VGA～1080p）
 
@@ -70,6 +70,7 @@ python sbs_portrait_bench.py --frames ~/data/sbs/portrait_0121 --bg ~/data/sbs/b
 - 后处理在约 960x540 像素的工作网格上进行，像素尺寸的算子按工作网格高度缩放；1080p 时与原实现完全相同。
 - `make_multires.py`：由 1080p 片段生成测试分辨率（6 种常见 + 4 种随机）；`run_multires.py`：一个进程依次 / 交替处理多种分辨率；`mr_bench.sh <name> <mode> <size_policy>`：测量 + 逐模块 + 每种分辨率离线评估，结果在 `results/mr/<name>/`；`prof/mr_tables.py` 生成汇总表。
 - TensorRT plugin 对照：`trt_plugin/msda_upstream_plugin.cu` 是直接包装工程自带 MSDeformAttn CUDA kernel 的 IPluginV3 插件（`trt_msda_plugin.py` 编译 / 加载，需要 TensorRT 头文件，见文件头），`--msda-plugin upstream` 用它代替内置插件；精度对比见 `prof/msda_plugin_spike.py`、`results/mr/msda_plugin/`。
+- 手写 kernel 对照（CUDA → 纹理 → Triton）：缩放 `area_cuda.py`、合成与画中画 `pip_compose.py`、person 融合 `person_cuda.py`、warp 与 box `warp_box.py`；测量脚本 `prof/{area,pip,ops}_spike.py`，结论见 QNN 仓库 `docs/Mask2Former-sbs-portrait-opt.md` 第十二节。
 - 画中画：`--pip frame`（本地 SBS 原图）或 `--pip icon` / `--pip <SBS RGBA png>`，每眼缩放到 H/8 × W/8 放在右上角，深度在人物之前。
 - `prof/` 中第一、二轮的剖析脚本（`pd_spike.py`、`td_spike.py`、`batch_spike.py`、`merge_spike.py`、`seg_breakdown.py` 等）按当时的 1080p 静态 engine 接口编写，没有随多分辨率改造维护，复现请切到 `sbs-portrait-baseline` 分支。
 - 试验与结论见 `results/mr/LOG.md`，完整分析见 QNN 仓库 `docs/Mask2Former-sbs-portrait-opt.md` 第十一节。

@@ -179,6 +179,8 @@ def main():
     ap.add_argument("--trt-arena", type=int, default=1, help="1: TRTChain arena, 0: per-engine buffers + pool")
     ap.add_argument("--fp16-features", type=int, default=1, help="FP16 backbone -> pixel decoder tensors")
     ap.add_argument("--profiles", default="exact", help="trt_common.PROFILE_SETS name")
+    ap.add_argument("--person-kernel", default="cuda", choices=("cuda", "triton"))
+    ap.add_argument("--post-kernels", default="triton", choices=("triton", "torch"))
     args = ap.parse_args()
     files = sorted(glob(os.path.join(args.frames, "*.jpg")))[: args.max_frames]
     keys = {int(k) for k in args.key_frames.split(",") if k}
@@ -190,11 +192,13 @@ def main():
     pipe = SBSPortraitPipeline(cv2.imread(files[0]), cv2.imread(args.bg), timer=timer, mode=args.mode,
                                size_policy=args.size_policy, profiles=args.profiles, pip=pip_source(args.pip),
                                compose_kernel=args.compose_kernel, msda_plugin=args.msda_plugin,
-                               trt_arena=bool(args.trt_arena), fp16_features=bool(args.fp16_features))
+                               trt_arena=bool(args.trt_arena), fp16_features=bool(args.fp16_features),
+                               person_kernel=args.person_kernel, post_kernels=args.post_kernels)
     init_s = time.perf_counter() - t_init
     stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip)
     mon.stop()
     stats.update({"init_s": init_s, "mode": args.mode, "size_policy": args.size_policy, "profiles": args.profiles,
+                  "person_kernel": args.person_kernel, "post_kernels": args.post_kernels,
                   "ru_maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024})
     with open(os.path.join(args.out, "stats.json"), "w") as fp:
         json.dump(stats, fp, indent=1)

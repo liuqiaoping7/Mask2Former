@@ -66,7 +66,7 @@ def _person_kernel(M, WP, WD, SK, PROB, IDS, OWNAT, OWNCNT,
         num += tl.load(WP + q) * sig
         den += tl.load(WD + q) * sig
         own = s >= 0.0
-        tl.atomic_add(OWNCNT + q, tl.sum((own & inb).to(tl.int32), axis=0))
+        tl.store(OWNCNT + pid * Q + q, tl.sum((own & inb).to(tl.int32), axis=0))
         prod = tl.load(SK + q) * sig
         upd = prod > best
         best = tl.where(upd, prod, best)
@@ -88,9 +88,10 @@ def fused_person(masks, w_person, w_den, score_keep, out_hw, scale_y, scale_x, b
     prob = torch.empty(oh, ow, device=dev, dtype=torch.float32)
     ids = torch.empty(oh, ow, device=dev, dtype=torch.int32)
     own_at = torch.empty(oh, ow, device=dev, dtype=torch.int8)
-    own_cnt = torch.zeros(q, device=dev, dtype=torch.int32)
     grid = (triton.cdiv(oh * ow, block),)
+    # per-block partial counts: a global atomic per query and block costs ~1/3 of the kernel (contention)
+    part = torch.empty(grid[0], q, device=dev, dtype=torch.int32)
     _person_kernel[grid](masks.contiguous(), w_person.float().contiguous(), w_den.float().contiguous(),
-                         score_keep.float().contiguous(), prob, ids, own_at, own_cnt,
+                         score_keep.float().contiguous(), prob, ids, own_at, part,
                          q, h4, w4, oh, ow, float(scale_y), float(scale_x), BLOCK=block)
-    return prob, ids.long(), own_at.bool(), own_cnt.float()
+    return prob, ids.long(), own_at.bool(), part.sum(0).float()

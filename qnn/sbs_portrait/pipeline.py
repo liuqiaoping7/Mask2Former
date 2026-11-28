@@ -96,7 +96,7 @@ class SBSPortraitPipeline:
                  work_pixels=WORK_PIXELS, soft=(0.4, 0.6), gf_eps=1e-4, lam=0.7, gate=0.5, bg_margin=4.0,
                  mode="opt", seg=None, size_policy="official", profiles="exact", geo_threads=4,
                  pip=None, compose_kernel="triton", geo_late_ms=5.0, msda_plugin="builtin", trt_arena=True,
-                 fp16_features=True, timer=None):
+                 fp16_features=True, timer=None, person_kernel="cuda", post_kernels="triton"):
         """mode: "opt" -- the optimized pipeline (TensorRT engines with dynamic-shape profiles,
         GPU pre / post-processing, CPU geometry overlapped in a worker thread); "ref" -- the
         reference: PyTorch FP32 model, torch person post-processing, CPU (OpenCV / numpy)
@@ -122,7 +122,10 @@ class SBSPortraitPipeline:
         compose_kernel: compositing (+ PiP) implementation, see pip_compose.KINDS.
         msda_plugin: MSDA plugin of the pixel-decoder engine, "builtin" or "upstream" (see seg.py).
         trt_arena: the three engines share one ping-pong arena (seg.py / trt_common.TRTChain).
-        fp16_features: FP16 backbone -> pixel decoder tensors (seg.py)."""
+        fp16_features: FP16 backbone -> pixel decoder tensors (seg.py).
+        person_kernel: fused person post-processing, "cuda" (person_cuda.py) or "triton"; ignored
+        when seg is given (set it on the segmenter).
+        post_kernels: warps and box filters of the alpha post-processing, "triton" or "torch"."""
         self.timer = timer or Timer()
         assert mode in ("opt", "ref")
         post, overlap = ("gpu", True) if mode == "opt" else ("cpu", False)
@@ -138,7 +141,8 @@ class SBSPortraitPipeline:
             if mode == "opt":
                 seg = PersonSegmenter(config_file, weights, precision="fp16", backbone="trt", fast_decoder=True,
                                       pixel_decoder="trt", decoder="trt", profiles=profiles, size_policy=size_policy,
-                                      msda_plugin=msda_plugin, trt_arena=trt_arena, fp16_features=fp16_features)
+                                      msda_plugin=msda_plugin, trt_arena=trt_arena, fp16_features=fp16_features,
+                                      person_kernel=person_kernel)
             else:
                 seg = PersonSegmenter(config_file, weights, precision="fp32", fused=False, size_policy=size_policy)
         self.seg = seg
@@ -192,7 +196,7 @@ class SBSPortraitPipeline:
             self.composer = Composer(H, W, ws, bg_hwc, kind=compose_kernel, src=pip,
                                      disparity=self.pip_disp if pip is not None else 0.0)
             self.gp = GPUPost(ws, bgL, bgR, soft=soft, gf=self.gf, lam=lam, gate=gate, person_disp=self.person_disp,
-                              ellipse=prm["ellipse"], core=prm["core"])
+                              ellipse=prm["ellipse"], core=prm["core"], kernels=post_kernels)
             self.up_stream = torch.cuda.Stream()  # geometry results are uploaded from the worker thread
 
     # ------------------------------------------------------------------ stages

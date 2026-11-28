@@ -22,6 +22,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+import warp_box as wb
+
 
 class Pinned:
     """Reusable pinned host buffers + async H2D/D2H (avoids pageable copies and re-pinning)."""
@@ -51,8 +53,11 @@ class Pinned:
 
 class GPUPost:
     def __init__(self, ws, bgL, bgR, soft=(0.4, 0.6), gf=(4, 1e-4), lam=0.7, gate=0.5, sigma=10.0,
-                 person_disp=0.0, ellipse=31, core=9, device="cuda"):
-        """ellipse / core: person band dilation (OpenCV ellipse) and core erosion sizes (odd)."""
+                 person_disp=0.0, ellipse=31, core=9, device="cuda", kernels="triton"):
+        """ellipse / core: person band dilation (OpenCV ellipse) and core erosion sizes (odd).
+        kernels: warps and box filters as "triton" kernels (warp_box.py) or "torch" ops."""
+        assert kernels in ("triton", "torch")
+        self.kernels = kernels
         self.dev = torch.device(device)
         self.ws = ws
         w, h = ws
@@ -85,9 +90,13 @@ class GPUPost:
 
     def warp_flow(self, img, flow):
         """out(x) = img(x + flow(x)); img (C,H,W), flow (H,W,2)."""
+        if self.kernels == "triton":
+            return wb.warp("triton", img.contiguous(), flow[..., 0], flow[..., 1])
         return self._sample(img, self.gx + flow[..., 0], self.gy + flow[..., 1])
 
     def warp_h(self, img, dx):
+        if self.kernels == "triton":
+            return wb.warp("triton", img.contiguous(), dx.contiguous())
         return self._sample(img, self.gx + dx, self.gy)
 
     # ------------------------------------------------------------ stages
@@ -142,6 +151,8 @@ class GPUPost:
         """9x9 mean of each (H, W) plane of x (N, H, W): reflect-101 pad, then a vertical and a
         horizontal 1-D average (separable: 2 x 9 instead of 81 taps)."""
         r = self.gf[0]
+        if self.kernels == "triton":
+            return wb.box("triton", x.contiguous(), r)
         y = F.pad(x[:, None], (r, r, r, r), mode="reflect")
         y = F.avg_pool2d(y, (2 * r + 1, 1), stride=1)
         return F.avg_pool2d(y, (1, 2 * r + 1), stride=1)[:, 0]

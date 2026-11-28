@@ -28,11 +28,11 @@ from run_pipeline import MemMonitor, git_rev, pip_source, run_sequence
 from seg import DEFAULT_CONFIG, DEFAULT_WEIGHTS, PersonSegmenter
 
 
-def make_seg(mode, size_policy, profiles, trt_arena=True, fp16_features=True):
+def make_seg(mode, size_policy, profiles, trt_arena=True, fp16_features=True, person_kernel="cuda"):
     if mode == "opt":
         return PersonSegmenter(DEFAULT_CONFIG, DEFAULT_WEIGHTS, precision="fp16", backbone="trt", fast_decoder=True,
                                pixel_decoder="trt", decoder="trt", profiles=profiles, size_policy=size_policy,
-                               trt_arena=trt_arena, fp16_features=fp16_features)
+                               trt_arena=trt_arena, fp16_features=fp16_features, person_kernel=person_kernel)
     return PersonSegmenter(DEFAULT_CONFIG, DEFAULT_WEIGHTS, precision="fp32", fused=False, size_policy=size_policy)
 
 
@@ -67,6 +67,8 @@ def main():
     ap.add_argument("--key-frames", default="0,75,149")
     ap.add_argument("--skip", type=int, default=5)
     ap.add_argument("--interleave", type=int, default=0)
+    ap.add_argument("--person-kernel", default="cuda", choices=("cuda", "triton"))
+    ap.add_argument("--post-kernels", default="triton", choices=("triton", "torch"))
     a = ap.parse_args()
     sizes = a.sizes.split(",") if a.sizes else json.load(open(os.path.join(a.sets, "sizes.json")))
     keys = {int(k) for k in a.key_frames.split(",") if k}
@@ -76,10 +78,11 @@ def main():
     mon = MemMonitor()
     mon.start()
     t0 = time.perf_counter()
-    seg = make_seg(a.mode, a.size_policy, a.profiles, bool(a.trt_arena), bool(a.fp16_features))
+    seg = make_seg(a.mode, a.size_policy, a.profiles, bool(a.trt_arena), bool(a.fp16_features), a.person_kernel)
     seg_init_s = time.perf_counter() - t0
     gpu_peak = rss_peak = 0
     summary = {"commit": git_rev(), "mode": a.mode, "size_policy": a.size_policy, "profiles": a.profiles,
+               "person_kernel": a.person_kernel, "post_kernels": a.post_kernels,
                "seg_init_s": seg_init_s, "sizes": {}}
     files = {s: sorted(glob(os.path.join(a.sets, s, "*.jpg")))[: a.max_frames] for s in sizes}
 
@@ -91,7 +94,8 @@ def main():
             mon.reset()
             t1 = time.perf_counter()
             pipe = SBSPortraitPipeline(cv2.imread(files[s][0]), bg, mode=a.mode, seg=seg, timer=timer,
-                                       pip=pip_source(a.pip), compose_kernel=a.compose_kernel)
+                                       pip=pip_source(a.pip), compose_kernel=a.compose_kernel,
+                                       post_kernels=a.post_kernels)
             init_s = time.perf_counter() - t1
             st = run_sequence(pipe, files[s], os.path.join(a.out, s), timer, mon, a.dump, keys, a.skip)
             pipe.close()
@@ -119,7 +123,8 @@ def main():
 def interleave(seg, sizes, files, bg, a, mon):
     """Round-robin over the sequences, one frame each (each frame changes the input shapes)."""
     timers = {s: Timer(sync=a.profile) for s in sizes}
-    pipes = {s: SBSPortraitPipeline(cv2.imread(files[s][0]), bg, mode=a.mode, seg=seg, timer=timers[s]) for s in sizes}
+    pipes = {s: SBSPortraitPipeline(cv2.imread(files[s][0]), bg, mode=a.mode, seg=seg, timer=timers[s],
+                                    post_kernels=a.post_kernels) for s in sizes}
     n = min(len(files[s]) for s in sizes)
     ms = {s: [] for s in sizes}
     mon.reset()

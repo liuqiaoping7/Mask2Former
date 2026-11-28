@@ -1,5 +1,6 @@
 """Mask2Former person segmenter for SBS eyes (official panoptic + semantic inference)."""
 import contextlib
+import functools
 import math
 import os
 import sys
@@ -29,7 +30,7 @@ class PersonSegmenter:
     def __init__(self, config_file=DEFAULT_CONFIG, weights=DEFAULT_WEIGHTS, opts=(), precision="fp32",
                  backbone="torch", eye_hw=None, trt_plan=None, fused=True, fast_decoder=False,
                  compile_decoders=False, pixel_decoder="torch", decoder="torch", profiles="exact",
-                 size_policy="official", batch=1, msda_plugin="builtin", trt_arena=True, fp16_features=True):
+                 size_policy="official", batch=1, msda_plugin="builtin", trt_arena=True, fp16_features=True, person_kernel="cuda"):
         """precision: "fp32" (reference) or "fp16" -- FP16 autocast for the whole model (the pixel
         decoder's FP32 forcing is lifted, only the MSDeformAttn kernel stays FP32; TF32 matmul is
         enabled for the remaining FP32 GEMMs) and FP16 person post-processing in person().
@@ -94,6 +95,8 @@ class PersonSegmenter:
         self.stream = torch.cuda.Stream()
         self._area = {}
         self.fused = fused
+        assert person_kernel in ("cuda", "triton")
+        self.person_kernel = person_kernel
         if fast_decoder:
             import types
 
@@ -211,15 +214,18 @@ class PersonSegmenter:
         return area_resize_normalize(eye, tx, ty, mean, std, rgb=self.fmt == "RGB")
 
     def _person_fused(self, masks, cls, hw, padded_hw, out_hw):
-        from person_triton import fused_person
-
         m = self.model
         (h, w), (Hp, Wp), (oh, ow) = hw, padded_hw, out_hw
         h4, w4 = masks.shape[-2:]
         num_classes = cls.shape[-1] - 1
         scores, labels = cls.max(-1)
         keep = labels.ne(num_classes) & (scores > m.object_mask_threshold)
-        prob, ids, own_at, own_area = fused_person(
+        if self.person_kernel == "cuda":  # person_cuda.py: global loads, shared-memory counts
+            import person_cuda
+            kernel = functools.partial(person_cuda.fused_person, "cuda")
+        else:
+            from person_triton import fused_person as kernel
+        prob, ids, own_at, own_area = kernel(
             masks, cls[:, PERSON_ID], 1.0 - cls[:, -1], scores * keep, (oh, ow),
             (h / oh) * (h4 / Hp), (w / ow) * (w4 / Wp))
         return prob, _panoptic_person_rule(m, scores, keep, labels, ids, own_at, own_area)
