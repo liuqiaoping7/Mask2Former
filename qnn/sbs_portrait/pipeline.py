@@ -183,6 +183,9 @@ class SBSPortraitPipeline:
         self.bgL, self.bgR = bgL, bgR
         self.prev_g = None
         self.post = post
+        # render.ring.Presenter (OpenGL / Vulkan): the composite is written into its buffer and stays on
+        # the GPU, process() then returns "out": None
+        self.sink = None
         self.pool = ThreadPoolExecutor(1, thread_name_prefix="geometry") if overlap else None
         self.pip = pip
         self.pip_lay = None
@@ -331,8 +334,26 @@ class SBSPortraitPipeline:
             tR = gp.ema("R", gp.guided(gRt / 255.0, sR), fbR, vR, phR)
             aL, aR = gp.fusion(tL, tR, dLf, dRf)
         with tm("gpu.compose+d2h", gpu=True):
-            out = gp.pin.down("out", self.composer(frame_t, aL, aR))
+            if self.sink is None:
+                out = gp.pin.down("out", self.composer(frame_t, aL, aR))
+            else:
+                out = self.present(frame_t, aL, aR)
         return {"out": out, "aL": aL, "aR": aR, "pL": pL, "pR": pR, "hL": hL, "hR": hR}
+
+    def present(self, frame_t, aL, aR):
+        """Composite into the sink's buffer (zero-copy: the compose kernel's output pointer is the
+        graphics API's memory) and publish it."""
+        with self.timer("render.acquire"):  # blocks while every slot is waiting to be rendered
+            dst = self.sink.begin()
+        if self.sink.closed:
+            return None
+        own = self.composer.out
+        if dst is not None:
+            self.composer.out = dst
+        self.sink.end(self.composer(frame_t, aL, aR))
+        self.composer.out = own
+        torch.cuda.current_stream().synchronize()
+        return None
 
     def cpu_geometry(self, L, R, upload=False):
         """Gray work-res images, SGBM disparities and raw DIS flows (fw + bw) for both eyes.

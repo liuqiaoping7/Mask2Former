@@ -8,6 +8,8 @@
 --dump    : save per-frame alphas / probs / masks (OUT/dump/*.npz) for eval_alpha.py.
 Writes OUT/stats.json, OUT/key_XXXX.png (full-res SBS) and OUT/preview.mp4 (half-res).
 Any eye size (VGA .. 1080p); several sizes in one process: run_multires.py.
+--render gl|vulkan: present the result in a window through CUDA interop instead of downloading it
+(the pipeline becomes a producer thread, see render/); no preview.mp4 and key_XXXX.png then.
 """
 import argparse
 import json
@@ -106,13 +108,16 @@ def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5,
             if t + 1 < len(files):
                 nxt = io.submit(cv2.imread, files[t + 1])
         r = pipe.process(frame)
+        if pipe.sink is not None and pipe.sink.closed:  # window closed
+            break
         with timer("encode"):  # bounded queue: at most one encode in flight
             if writer is not None:
                 if pending is not None:
                     pending.result()
                 o = r["out"].copy()  # r["out"] is a reused pinned buffer
                 pending = enc.submit(lambda o: writer.write(cv2.resize(o, (W, H // 2), interpolation=cv2.INTER_AREA)), o)
-        torch.cuda.synchronize()
+        if pipe.sink is None:  # with a sink: process() synchronised its stream
+            torch.cuda.synchronize()
         frame_ms.append((time.perf_counter() - t0) * 1000.0)
         if t == 0:
             first_frame_unix = time.time()
@@ -124,7 +129,7 @@ def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5,
                                 aL=r["aL"].astype(np.float16), aR=r["aR"].astype(np.float16),
                                 pL=(r["pL"] * 255 + 0.5).astype(np.uint8), pR=(r["pR"] * 255 + 0.5).astype(np.uint8),
                                 hL=r["hL"], hR=r["hR"])
-        if t in keys:
+        if t in keys and r["out"] is not None:
             cv2.imwrite(os.path.join(out, f"key_{t:04d}.png"), r["out"])
     if pending is not None:
         pending.result()
@@ -165,6 +170,38 @@ def pip_source(arg):
     return cv2.imread(arg, cv2.IMREAD_UNCHANGED)
 
 
+def run_rendered(args, files, make_pipe, timer, mon, keys):
+    """Producer thread: pipeline construction and the frame loop; this (main) thread: the window."""
+    from render.ring import Presenter, run_decoupled
+
+    h, w = cv2.imread(files[0]).shape[:2]
+    window = tuple(map(int, args.window.split("x"))) if args.window else None
+    pres = Presenter(args.render, w, h, slots=args.slots, zerocopy=args.present == "zerocopy", vsync=bool(args.vsync),
+                     drop=args.queue == "drop", window=window, check=args.render_check, validate=args.validate)
+    print(pres.description, flush=True)
+    os.makedirs(args.out, exist_ok=True)
+
+    def save_key(t, rgba):  # key frames as the graphics API drew them
+        if t in keys:
+            cv2.imwrite(os.path.join(args.out, f"render_{t:04d}.png"), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR))
+
+    pres.on_checked = save_key
+
+    def produce():
+        t0 = time.perf_counter()
+        pipe = make_pipe()
+        pipe.sink = pres
+        init_s = time.perf_counter() - t0
+        stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip, preview=False)
+        pipe.close()
+        return init_s, stats
+
+    init_s, stats = run_decoupled(pres, produce)
+    stats["render"] = pres.stats()
+    pres.close()
+    return init_s, stats
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", required=True)
@@ -186,21 +223,37 @@ def main():
     ap.add_argument("--person-kernel", default="cuda", choices=("cuda", "triton"))
     ap.add_argument("--post-kernels", default="triton", choices=("triton", "torch"))
     ap.add_argument("--no-preview", action="store_true", help="no preview.mp4 (comparison with cpp/)")
+    ap.add_argument("--render", default="", choices=("", "gl", "vulkan"), help="present in a window (render/)")
+    ap.add_argument("--present", default="zerocopy", choices=("zerocopy", "copy"), help="copy: through host memory")
+    ap.add_argument("--queue", default="block", choices=("block", "drop"), help="full queue: wait or drop the oldest")
+    ap.add_argument("--slots", type=int, default=3)
+    ap.add_argument("--vsync", type=int, default=1)
+    ap.add_argument("--window", default="", help="window size WxH")
+    ap.add_argument("--render-check", type=int, default=0, help="first N frames: read the drawn image back and compare")
+    ap.add_argument("--validate", action="store_true", help="Vulkan validation layer (VK_LAYER_PATH)")
     args = ap.parse_args()
     files = sorted(glob(os.path.join(args.frames, "*.jpg")))[: args.max_frames]
     keys = {int(k) for k in args.key_frames.split(",") if k}
 
     mon = MemMonitor()
     mon.start()
-    t_init = time.perf_counter()
     timer = Timer(sync=args.profile)
-    pipe = SBSPortraitPipeline(cv2.imread(files[0]), cv2.imread(args.bg), timer=timer, mode=args.mode,
-                               size_policy=args.size_policy, profiles=args.profiles, pip=pip_source(args.pip),
-                               compose_kernel=args.compose_kernel, msda_plugin=args.msda_plugin,
-                               trt_arena=bool(args.trt_arena), fp16_features=bool(args.fp16_features),
-                               person_kernel=args.person_kernel, post_kernels=args.post_kernels)
-    init_s = time.perf_counter() - t_init
-    stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip, not args.no_preview)
+
+    def make_pipe():
+        return SBSPortraitPipeline(cv2.imread(files[0]), cv2.imread(args.bg), timer=timer, mode=args.mode,
+                                   size_policy=args.size_policy, profiles=args.profiles, pip=pip_source(args.pip),
+                                   compose_kernel=args.compose_kernel, msda_plugin=args.msda_plugin,
+                                   trt_arena=bool(args.trt_arena), fp16_features=bool(args.fp16_features),
+                                   person_kernel=args.person_kernel, post_kernels=args.post_kernels)
+
+    if args.render:
+        assert args.mode == "opt", "--render needs the GPU compositor"
+        init_s, stats = run_rendered(args, files, make_pipe, timer, mon, keys)
+    else:
+        t_init = time.perf_counter()
+        pipe = make_pipe()
+        init_s = time.perf_counter() - t_init
+        stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip, not args.no_preview)
     mon.stop()
     stats.update({"init_s": init_s, "mode": args.mode, "size_policy": args.size_policy, "profiles": args.profiles,
                   "person_kernel": args.person_kernel, "post_kernels": args.post_kernels,

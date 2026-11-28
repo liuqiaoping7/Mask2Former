@@ -10,8 +10,12 @@
 #include <cstring>
 #include <future>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <thread>
 #include "pipeline.hpp"
+#ifdef SBS_RENDER
+#include "renderer.hpp"
+#endif
 
 namespace {
 
@@ -19,6 +23,10 @@ struct Args {
   std::string frames, sets, sizes, bg, out, assets, kernel = "cuda", pip, key_frames = "0,75,149", stage_dir;
   int max_frames = 150, skip = 5, stage_frames = 0, geo_threads = 4;
   bool profile = false, dump = false, op_times = false;
+  // --render: present the result with OpenGL / Vulkan instead of downloading it
+  std::string render, present = "zerocopy", queue = "block", window;
+  int slots = 3, vsync = 1, render_check = 0;
+  bool validate = false;
 };
 
 class MemMonitor {  // samples this process's GPU memory (NVML) and RSS every 10 ms
@@ -96,7 +104,8 @@ double pct(std::vector<double> v, double q) { return geo::percentile(std::move(v
 
 // returns the stats JSON of one sequence
 std::string run_sequence(Segmenter& seg, const Args& a, const std::vector<std::string>& files, const cv::Mat& bg,
-                         const std::string& out, MemMonitor& mon, const PipelineConfig& cfg, double& first_unix) {
+                         const std::string& out, MemMonitor& mon, const PipelineConfig& cfg, double& first_unix,
+                         FrameSink* sink = nullptr) {
   mkdir(out.c_str(), 0755);
   if (a.dump) mkdir((out + "/dump").c_str(), 0755);
   Timer timer(a.profile);
@@ -122,14 +131,15 @@ std::string run_sequence(Segmenter& seg, const Args& a, const std::vector<std::s
       frame = next.get();
       if (t + 1 < files.size()) next = std::async(std::launch::async, decode, files[t + 1]);
     }
-    const uint8_t* res = pipe.process(frame);
-    CU(cudaDeviceSynchronize());
+    const uint8_t* res = pipe.process(frame, sink);
+    if (pipe.sink_closed()) break;  // window closed
+    if (!sink) CU(cudaDeviceSynchronize());  // with a sink: process() synchronised its stream
     ms.push_back(now_ms() - t0);
     if (a.op_times) g_ops.end_frame((int)t >= a.skip);
     if (first_unix == 0) first_unix = unix_time();
     if (a.dump) pipe.dump_outputs(out + "/dump", (int)t);
     for (auto& k : keys)
-      if (std::stoi(k) == (int)t) {
+      if (res && std::stoi(k) == (int)t) {
         char name[32];
         std::snprintf(name, sizeof name, "/key_%04zu.png", t);
         cv::imwrite(out + name, cv::Mat(pipe.H(), 2 * pipe.W(), CV_8UC3, (void*)res));
@@ -137,6 +147,7 @@ std::string run_sequence(Segmenter& seg, const Args& a, const std::vector<std::s
   }
   seg.set_dump("", 0);
   g_ops.on = false;
+  if (ms.empty()) return "{}";
   std::vector<double> fm(ms.begin() + std::min<size_t>(a.skip, ms.size() - 1), ms.end());
   double mean = std::accumulate(fm.begin(), fm.end(), 0.0) / fm.size();
   std::ostringstream j;
@@ -165,6 +176,61 @@ std::string run_sequence(Segmenter& seg, const Args& a, const std::vector<std::s
   return j.str();
 }
 
+#ifdef SBS_RENDER
+// producer: this sequence in its own thread; consumer: this (main) thread, which owns the window
+std::string run_rendered(Segmenter& seg, const Args& a, const std::vector<std::string>& files, const cv::Mat& bg,
+                         const std::string& out, MemMonitor& mon, const PipelineConfig& cfg, double& first_unix) {
+  cv::Mat first = cv::imread(files[0]);
+  render::Config rc;
+  rc.api = a.render;
+  rc.width = first.cols;
+  rc.height = first.rows;
+  rc.slots = a.slots;
+  rc.zerocopy = a.present != "copy";
+  rc.drop = a.queue == "drop";
+  rc.vsync = a.vsync != 0;
+  rc.validate = a.validate;
+  rc.check = a.render_check;
+  rc.shader_dir = SHADER_DIR;
+  if (!a.window.empty()) std::sscanf(a.window.c_str(), "%dx%d", &rc.win_w, &rc.win_h);
+  render::Presenter pres(rc);
+  std::printf("%s\n", pres.description().c_str());
+  mkdir(out.c_str(), 0755);
+  std::vector<std::string> keys = split(a.key_frames);
+  pres.on_checked = [&](int t, const uint8_t* rgba) {  // key frames as the graphics API drew them
+    if (std::find(keys.begin(), keys.end(), std::to_string(t)) == keys.end()) return;
+    cv::Mat bgr;
+    cv::cvtColor(cv::Mat(rc.height, rc.width, CV_8UC4, (void*)rgba), bgr, cv::COLOR_RGBA2BGR);
+    char name[32];
+    std::snprintf(name, sizeof name, "/render_%04d.png", t);
+    cv::imwrite(out + name, bgr);
+  };
+  std::string st;
+  std::exception_ptr error;
+  std::thread producer([&] {
+    try {
+      st = run_sequence(seg, a, files, bg, out, mon, cfg, first_unix, &pres);
+    } catch (...) {
+      error = std::current_exception();
+    }
+    pres.finish();
+  });
+  try {
+    pres.run();
+  } catch (...) {
+    producer.detach();  // the process is about to exit with the error
+    throw;
+  }
+  producer.join();
+  if (error) std::rethrow_exception(error);
+  std::string r = pres.stats_json();
+  std::ofstream(out + "/render.json") << r << "\n";
+  if (st.size() > 2) st.insert(st.size() - 1, ", \"render\": " + r);
+  std::ofstream(out + "/stats.json") << st << "\n";
+  return st;
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) try {
@@ -192,10 +258,22 @@ int main(int argc, char** argv) try {
     else if (k == "--profile") a.profile = true;
     else if (k == "--dump") a.dump = true;
     else if (k == "--op-times") a.op_times = true;
+    else if (k == "--render") a.render = val();
+    else if (k == "--present") a.present = val();
+    else if (k == "--queue") a.queue = val();
+    else if (k == "--slots") a.slots = std::stoi(val());
+    else if (k == "--vsync") a.vsync = std::stoi(val());
+    else if (k == "--window") a.window = val();
+    else if (k == "--render-check") a.render_check = std::stoi(val());
+    else if (k == "--validate") a.validate = true;
     else throw std::runtime_error("unknown argument " + k);
   }
   if ((a.frames.empty() == a.sets.empty()) || a.bg.empty() || a.out.empty() || a.assets.empty())
     throw std::runtime_error("need --assets, --bg, --out and one of --frames DIR | --sets DIR --sizes WxH,...");
+  if (!a.render.empty() && a.frames.empty()) throw std::runtime_error("--render needs --frames (one size)");
+#ifndef SBS_RENDER
+  if (!a.render.empty()) throw std::runtime_error("built without rendering support (see render/setup_deps.sh)");
+#endif
   const std::map<std::string, k::Mode> modes{{"cuda", k::GLOBAL}, {"tex_point", k::TEX_POINT}, {"tex_linear", k::TEX_LINEAR}};
 
   MemMonitor mon;
@@ -219,7 +297,13 @@ int main(int argc, char** argv) try {
     auto files = jpgs(name.empty() ? a.frames : a.sets + "/" + name);
     if ((int)files.size() > a.max_frames) files.resize(a.max_frames);
     if (files.empty()) throw std::runtime_error("no frames");
-    std::string st = run_sequence(seg, a, files, bg, name.empty() ? a.out : a.out + "/" + name, mon, cfg, first_unix);
+    std::string dir = name.empty() ? a.out : a.out + "/" + name, st;
+#ifdef SBS_RENDER
+    if (!a.render.empty())
+      st = run_rendered(seg, a, files, bg, dir, mon, cfg, first_unix);
+    else
+#endif
+      st = run_sequence(seg, a, files, bg, dir, mon, cfg, first_unix);
     std::printf("%s %s\n", name.c_str(), st.c_str());
     std::fflush(stdout);
     summary << (i ? ", " : "") << "\"" << (name.empty() ? "seq" : name) << "\": " << st;

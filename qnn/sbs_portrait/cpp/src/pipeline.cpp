@@ -324,7 +324,7 @@ void Pipeline::post(const Geometry& g) {
 }
 
 // ------------------------------------------------------------------ frame
-const uint8_t* Pipeline::process(const Mat& frame) {
+const uint8_t* Pipeline::process(const Mat& frame, FrameSink* sink) {
   const int W = W_, H = H_;
   size_t row = (size_t)2 * W * 3, bytes = row * H;
   Mat L = frame.colRange(0, W), R = frame.colRange(W, 2 * W);
@@ -380,14 +380,28 @@ const uint8_t* Pipeline::process(const Mat& frame) {
     ev_up_.wait_in(main_);  // uploads ran on up_ while the GPU was segmenting
     post(g);
   }
+  uint8_t* dst = out_.p;
+  if (sink) {  // blocks while every slot is waiting to be rendered (queue policy "block")
+    Timer::Scope t(timer_, "render.acquire", false);
+    uint8_t* p = nullptr;
+    if (!sink->begin(&p, main_)) {
+      sink_closed_ = true;
+      return nullptr;
+    }
+    if (p) dst = p;  // zero-copy: the compose kernel writes into the graphics API's buffer
+  }
   {
     Timer::Scope t(timer_, "gpu.compose+d2h", true);
     if (pip_from_frame_) pip_.src = frame_.p;
-    { OpScope op_("compose", main_); k::compose(seg_.mode, frame_, bg_, alpha_, apad_, apitch_, out_, H, W, ws_.h, ws_.w, pip_, main_); }
+    { OpScope op_("compose", main_); k::compose(seg_.mode, frame_, bg_, alpha_, apad_, apitch_, dst, H, W, ws_.h, ws_.w, pip_, main_); }
     if (pip_.on && !pip_from_frame_) pip_.rgba_ready = 1;
-    CU(cudaMemcpyAsync(out_pin_.p, out_.p, bytes, cudaMemcpyDeviceToHost, main_));
+    if (sink)
+      sink->end(dst, main_);
+    else
+      CU(cudaMemcpyAsync(out_pin_.p, out_.p, bytes, cudaMemcpyDeviceToHost, main_));
     CU(cudaStreamSynchronize(main_));
   }
+  if (sink) return nullptr;
   if (!dir.empty())
     write_bin(dir, "out_" + std::to_string(frames_ - 1), "u1", {H, 2 * W, 3}, out_pin_.p, bytes);
   return out_pin_.p;

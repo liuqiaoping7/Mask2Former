@@ -7,6 +7,7 @@
 #include <string>
 #include "geometry.hpp"
 #include "segmenter.hpp"
+#include "sink.hpp"
 
 struct PipelineConfig {
   float soft_lo = 0.4f, soft_hi = 0.6f, gf_eps = 1e-4f, lam = 0.7f, gate = 0.5f, sigma = 10.0f;
@@ -24,8 +25,10 @@ class Pipeline {
  public:
   Pipeline(Segmenter& seg, const cv::Mat& first_frame, const cv::Mat& bg_sbs, Timer* timer, const PipelineConfig& cfg);
   ~Pipeline();
-  // returns the composited SBS frame (H, 2W, 3) in a reused pinned buffer
-  const uint8_t* process(const cv::Mat& frame);
+  // returns the composited SBS frame (H, 2W, 3) in a reused pinned buffer; with a sink the frame
+  // stays on the GPU (written into the sink's buffer) and the result is nullptr
+  const uint8_t* process(const cv::Mat& frame, FrameSink* sink = nullptr);
+  bool sink_closed() const { return sink_closed_; }
   int W() const { return W_; }
   int H() const { return H_; }
   geo::Work work() const { return ws_; }
@@ -57,6 +60,7 @@ class Pipeline {
   double late_ema_ = 0, init_person_disp_ = 0, bg_shift_ = 0;
   float person_disp_ = 0;
   int frames_ = 0;
+  bool sink_closed_ = false;
 
   std::unique_ptr<Input> in_;
   std::unique_ptr<PersonOut> seg_out_;

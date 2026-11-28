@@ -50,3 +50,8 @@ python tools/compare.py REF CPP
 ```
 
 `--stage-dir` 的运行耗时不可用（在计时区间内下载张量）。
+
+## 结果上屏
+
+`--render gl|vulkan`（CUDA → OpenGL / Vulkan 零拷贝）及 `render_bench`：实现在 `render/`，接口在 `src/sink.hpp`，用法见 `../render/README.md`。
+先跑 `../render/setup_deps.sh`；缺这些依赖时构建会自动跳过渲染部分。
