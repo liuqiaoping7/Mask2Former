@@ -69,6 +69,7 @@ def main():
     ap.add_argument("--interleave", type=int, default=0)
     ap.add_argument("--person-kernel", default="cuda", choices=("cuda", "triton"))
     ap.add_argument("--post-kernels", default="triton", choices=("triton", "torch"))
+    ap.add_argument("--no-preview", action="store_true", help="no preview.mp4 (comparison with cpp/)")
     a = ap.parse_args()
     sizes = a.sizes.split(",") if a.sizes else json.load(open(os.path.join(a.sets, "sizes.json")))
     keys = {int(k) for k in a.key_frames.split(",") if k}
@@ -97,7 +98,7 @@ def main():
                                        pip=pip_source(a.pip), compose_kernel=a.compose_kernel,
                                        post_kernels=a.post_kernels)
             init_s = time.perf_counter() - t1
-            st = run_sequence(pipe, files[s], os.path.join(a.out, s), timer, mon, a.dump, keys, a.skip)
+            st = run_sequence(pipe, files[s], os.path.join(a.out, s), timer, mon, a.dump, keys, a.skip, not a.no_preview)
             pipe.close()
             del pipe
             torch.cuda.empty_cache()  # per-size GPU peaks without the previous size's cached blocks

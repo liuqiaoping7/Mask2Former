@@ -78,7 +78,7 @@ def trt_mem(seg):
             "out_bufs": sum(mb(t) for r in runners if r.buf for t in r.buf.values())}
 
 
-def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5):
+def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5, preview=True):
     """Process `files` with `pipe` (decode prefetched, encode asynchronous, like a player) and
     return the stats dict; latency excludes the first `skip` frames."""
     os.makedirs(out, exist_ok=True)
@@ -89,7 +89,7 @@ def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5)
     if mon is not None:
         mon.reset()
     W, H = pipe.W, pipe.H
-    writer = cv2.VideoWriter(os.path.join(out, "preview.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 30, (W, H // 2))
+    writer = cv2.VideoWriter(os.path.join(out, "preview.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 30, (W, H // 2)) if preview else None
     # I/O off the critical path: decode of the next frame is prefetched, encoding is asynchronous
     io = ThreadPoolExecutor(1, thread_name_prefix="decode")
     enc = ThreadPoolExecutor(1, thread_name_prefix="encode")
@@ -107,12 +107,15 @@ def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5)
                 nxt = io.submit(cv2.imread, files[t + 1])
         r = pipe.process(frame)
         with timer("encode"):  # bounded queue: at most one encode in flight
-            if pending is not None:
-                pending.result()
-            o = r["out"].copy()  # r["out"] is a reused pinned buffer
-            pending = enc.submit(lambda o: writer.write(cv2.resize(o, (W, H // 2), interpolation=cv2.INTER_AREA)), o)
+            if writer is not None:
+                if pending is not None:
+                    pending.result()
+                o = r["out"].copy()  # r["out"] is a reused pinned buffer
+                pending = enc.submit(lambda o: writer.write(cv2.resize(o, (W, H // 2), interpolation=cv2.INTER_AREA)), o)
         torch.cuda.synchronize()
         frame_ms.append((time.perf_counter() - t0) * 1000.0)
+        if t == 0:
+            first_frame_unix = time.time()
         torch.cuda.nvtx.range_pop()
         # outputs for correctness checks (not timed)
         if dump:
@@ -125,13 +128,14 @@ def run_sequence(pipe, files, out, timer, mon=None, dump=False, keys=(), skip=5)
             cv2.imwrite(os.path.join(out, f"key_{t:04d}.png"), r["out"])
     if pending is not None:
         pending.result()
-    writer.release()
+    if writer is not None:
+        writer.release()
     io.shutdown()
     enc.shutdown()
     fm = np.array(frame_ms[skip:])
     mods = timer.summary(skip=skip)
     stats = {
-        "commit": git_rev(), "frames": len(files), "profile_sync": timer.sync,
+        "commit": git_rev(), "frames": len(files), "profile_sync": timer.sync, "first_frame_unix": first_frame_unix,
         "eye_wh": [W, H], "work_wh": list(pipe.ws), "work_params": pipe.params,
         "geo_parallel": bool(getattr(pipe, "geo_par", False)),
         "e2e_ms": {"median": float(np.median(fm)), "mean": float(fm.mean()), "p95": float(np.percentile(fm, 95)),
@@ -181,6 +185,7 @@ def main():
     ap.add_argument("--profiles", default="exact", help="trt_common.PROFILE_SETS name")
     ap.add_argument("--person-kernel", default="cuda", choices=("cuda", "triton"))
     ap.add_argument("--post-kernels", default="triton", choices=("triton", "torch"))
+    ap.add_argument("--no-preview", action="store_true", help="no preview.mp4 (comparison with cpp/)")
     args = ap.parse_args()
     files = sorted(glob(os.path.join(args.frames, "*.jpg")))[: args.max_frames]
     keys = {int(k) for k in args.key_frames.split(",") if k}
@@ -195,7 +200,7 @@ def main():
                                trt_arena=bool(args.trt_arena), fp16_features=bool(args.fp16_features),
                                person_kernel=args.person_kernel, post_kernels=args.post_kernels)
     init_s = time.perf_counter() - t_init
-    stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip)
+    stats = run_sequence(pipe, files, args.out, timer, mon, args.dump, keys, args.skip, not args.no_preview)
     mon.stop()
     stats.update({"init_s": init_s, "mode": args.mode, "size_policy": args.size_policy, "profiles": args.profiles,
                   "person_kernel": args.person_kernel, "post_kernels": args.post_kernels,

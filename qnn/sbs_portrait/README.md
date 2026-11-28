@@ -71,6 +71,7 @@ python sbs_portrait_bench.py --frames ~/data/sbs/portrait_0121 --bg ~/data/sbs/b
 - `make_multires.py`：由 1080p 片段生成测试分辨率（6 种常见 + 4 种随机）；`run_multires.py`：一个进程依次 / 交替处理多种分辨率；`mr_bench.sh <name> <mode> <size_policy>`：测量 + 逐模块 + 每种分辨率离线评估，结果在 `results/mr/<name>/`；`prof/mr_tables.py` 生成汇总表。
 - TensorRT plugin 对照：`trt_plugin/msda_upstream_plugin.cu` 是直接包装工程自带 MSDeformAttn CUDA kernel 的 IPluginV3 插件（`trt_msda_plugin.py` 编译 / 加载，需要 TensorRT 头文件，见文件头），`--msda-plugin upstream` 用它代替内置插件；精度对比见 `prof/msda_plugin_spike.py`、`results/mr/msda_plugin/`。
 - 手写 kernel 对照（CUDA → 纹理 → Triton）：缩放 `area_cuda.py`、合成与画中画 `pip_compose.py`、person 融合 `person_cuda.py`、warp 与 box `warp_box.py`；测量脚本 `prof/{area,pip,ops}_spike.py`，结论见 QNN 仓库 `docs/Mask2Former-sbs-portrait-opt.md` 第十二节。
+- C++ / CUDA 版（学习用，不依赖 torch，含纹理访存对照）：`cpp/`，见 `cpp/README.md`；与本流水线的对比在 `results/mr/cpp/LOG.md`。
 - 画中画：`--pip frame`（本地 SBS 原图）或 `--pip icon` / `--pip <SBS RGBA png>`，每眼缩放到 H/8 × W/8 放在右上角，深度在人物之前。
 - `prof/` 中第一、二轮的剖析脚本（`pd_spike.py`、`td_spike.py`、`batch_spike.py`、`merge_spike.py`、`seg_breakdown.py` 等）按当时的 1080p 静态 engine 接口编写，没有随多分辨率改造维护，复现请切到 `sbs-portrait-baseline` 分支。
 - 试验与结论见 `results/mr/LOG.md`，完整分析见 QNN 仓库 `docs/Mask2Former-sbs-portrait-opt.md` 第十一节。
